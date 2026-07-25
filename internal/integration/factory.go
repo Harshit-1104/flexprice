@@ -488,6 +488,7 @@ func (f *Factory) GetPaddleIntegration(ctx context.Context) (*PaddleIntegration,
 	webhookHandler := paddlewebhook.NewHandler(
 		paymentSvc,
 		syncSvc,
+		f.subscriptionRepo,
 		f.logger,
 	)
 
@@ -703,9 +704,9 @@ func (f *Factory) GetTabsIntegration(ctx context.Context) (*TabsIntegration, err
 		f.customerRepo,
 		f.subscriptionRepo,
 		f.planRepo,
-		f.priceRepo,
 		f.invoiceRepo,
 		f.entityIntegrationMappingRepo,
+		f.locker,
 		f.logger,
 	)
 

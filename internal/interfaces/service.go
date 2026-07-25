@@ -45,7 +45,7 @@ type PaymentService interface {
 type InvoiceService interface {
 	CreateInvoice(ctx context.Context, req dto.CreateInvoiceRequest) (*dto.InvoiceResponse, error)
 	CreateEmptyDraftInvoice(ctx context.Context, req dto.CreateDraftInvoiceRequest) (*dto.InvoiceResponse, error)
-	ComputeInvoice(ctx context.Context, invoiceID string, req *dto.InvoiceComputeRequest) (bool, error)
+	ComputeInvoice(ctx context.Context, invoiceID string, req *dto.InvoiceComputeRequest) (*invoice.Invoice, bool, error)
 	FinalizeInvoice(ctx context.Context, id string) error
 	GetInvoice(ctx context.Context, id string) (*dto.InvoiceResponse, error)
 	ListInvoices(ctx context.Context, filter *types.InvoiceFilter) (*dto.ListInvoicesResponse, error)
@@ -223,6 +223,9 @@ type CheckoutSessionService interface {
 	// CompleteCheckoutSession activates the subscription, finalizes the invoice, and marks
 	// the payment succeeded. Called by gateway webhook handlers after payment confirmation.
 	CompleteCheckoutSession(ctx context.Context, sessionID string, providerResult *types.CheckoutProviderResult) error
+	// StartPayFirstCheckoutSession creates a checkout session on an existing DRAFT invoice,
+	// fulfills payment + provider link, and publishes checkout.session.initiated.
+	StartPayFirstCheckoutSession(ctx context.Context, req *dto.PayFirstCheckoutRequest) (*dto.CheckoutSessionResponse, error)
 }
 
 type ServiceDependencies struct {
