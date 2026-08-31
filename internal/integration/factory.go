@@ -1376,6 +1376,16 @@ func (f *Factory) GetS3Client(ctx context.Context) (*s3.Client, error) {
 	return f.s3Client, nil
 }
 
+// GetSavedMethodProvider returns the SavedMethodProvider adapter for the given
+// gateway. No adapters exist yet, so every provider reports ErrNotImplemented; a
+// caller must treat that as "this provider cannot manage saved methods" rather
+// than as a failure, which is also the permanent answer for Razorpay.
+func (f *Factory) GetSavedMethodProvider(ctx context.Context, gateway types.PaymentGatewayType, customerSvc interfaces.CustomerService) (interfaces.SavedMethodProvider, error) {
+	return nil, ierr.NewError("saved payment methods are not supported for this provider").
+		WithHintf("%s cannot manage saved payment methods", gateway).
+		Mark(ierr.ErrNotImplemented)
+}
+
 // GetCheckoutProvider returns the CheckoutProvider adapter for the given payment provider.
 // Returns ErrValidation for providers that do not support hosted checkout.
 func (f *Factory) GetCheckoutProvider(ctx context.Context, provider types.CheckoutPaymentProvider, customerSvc interfaces.CustomerService, invoiceSvc interfaces.InvoiceService) (interfaces.CheckoutProvider, error) {

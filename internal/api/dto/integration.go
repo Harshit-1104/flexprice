@@ -127,15 +127,12 @@ func EntityOnlySyncConfig(sc *types.SyncConfig) *types.SyncConfig {
 	}
 }
 
-// Clients branch on capability, never on provider name — Stripe vaults cards but
-// has no hosted-checkout adapter, and Razorpay's unattended charging needs a
-// mandate. Only capabilities that actually differ between providers are modelled.
-type IntegrationCapability string
+type IntegrationCapability = types.IntegrationCapability
 
 const (
-	IntegrationCapabilityCheckout   IntegrationCapability = "checkout"
-	IntegrationCapabilityAutoCharge IntegrationCapability = "auto_charge"
-	IntegrationCapabilitySetDefault IntegrationCapability = "set_default"
+	IntegrationCapabilityCheckout   = types.IntegrationCapabilityCheckout
+	IntegrationCapabilityAutoCharge = types.IntegrationCapabilityAutoCharge
+	IntegrationCapabilitySetDefault = types.IntegrationCapabilitySetDefault
 )
 
 // Derived from connections rows at read time, not stored alongside
