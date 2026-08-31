@@ -174,3 +174,36 @@ func (s *WalletServiceSuite) TestFailedTopupTransaction_UnblocksAutoTopup() {
 	s.Equal(txID, last.ID)
 	s.NotEqual(types.TransactionStatusPending, last.TxStatus, "guard must no longer block")
 }
+
+// A voided invoice will never be paid, so its pending purchased-credit transaction
+// must not stay pending — that permanently blocks the wallet's auto-topup guard.
+func (s *WalletServiceSuite) TestVoidInvoice_FailsPendingPurchasedCreditTransaction() {
+	s.seedAutoComplete(false)
+	ctx := s.GetContext()
+	params := s.buildServiceParams()
+	ws := s.service.(*walletService)
+	balanceBefore := s.testData.wallet.CreditBalance
+
+	txID, invID, err := ws.handlePurchasedCreditInvoicedTransaction(
+		ctx,
+		s.testData.wallet.ID,
+		lo.ToPtr("void-fails-pending-tx"),
+		&dto.TopUpWalletRequest{
+			CreditsToAdd:      decimal.NewFromInt(100),
+			TransactionReason: types.TransactionReasonPurchasedCreditInvoiced,
+			Metadata:          types.Metadata{types.WalletMetadataKeyAutoTopup: "true"},
+		},
+	)
+	s.Require().NoError(err)
+
+	invSvc := NewInvoiceService(params)
+	s.Require().NoError(invSvc.VoidInvoice(ctx, invID, dto.InvoiceVoidRequest{}))
+
+	tx, err := s.GetStores().WalletRepo.GetTransactionByID(ctx, txID)
+	s.Require().NoError(err)
+	s.Equal(types.TransactionStatusFailed, tx.TxStatus, "voided invoice must not leave a pending top-up")
+
+	w, err := s.GetStores().WalletRepo.GetWalletByID(ctx, s.testData.wallet.ID)
+	s.Require().NoError(err)
+	s.True(balanceBefore.Equal(w.CreditBalance), "voiding an unpaid top-up must be balance-neutral")
+}

@@ -1360,6 +1360,32 @@ func (s *invoiceService) VoidInvoice(ctx context.Context, id string, req dto.Inv
 		return err
 	}
 
+	// A voided invoice will never be paid, so a purchased-credit transaction still
+	// waiting on it must not stay pending: it blocks the wallet's auto-topup guard
+	// indefinitely and is unrecoverable without a manual DB edit.
+	if inv.Metadata != nil {
+		if walletTransactionID, ok := inv.Metadata["wallet_transaction_id"]; ok && walletTransactionID != "" {
+			walletService := NewWalletService(s.ServiceParams)
+			failErr := walletService.FailPurchasedCreditTransaction(ctx, walletTransactionID,
+				fmt.Sprintf("invoice %s voided", inv.ID))
+			switch {
+			case failErr == nil:
+			case ierr.IsInvalidOperation(failErr):
+				// Already settled — a paid invoice being voided is refunded, not un-credited.
+				s.Logger.Info(ctx, "purchased credit transaction not pending on void, left unchanged",
+					"invoice_id", inv.ID,
+					"wallet_transaction_id", walletTransactionID,
+				)
+			default:
+				s.Logger.Error(ctx, "failed to fail purchased credit transaction on void",
+					"error", failErr,
+					"invoice_id", inv.ID,
+					"wallet_transaction_id", walletTransactionID,
+				)
+			}
+		}
+	}
+
 	s.publishSystemEvent(ctx, types.WebhookEventInvoiceUpdateVoided, inv.ID)
 	return nil
 }

@@ -151,11 +151,12 @@ func (s *connectionService) encryptMetadata(encryptedSecretData types.Connection
 			}
 
 			encryptedMetadata.Chargebee = &types.ChargebeeConnectionMetadata{
-				Site:            encryptedSecretData.Chargebee.Site, // Site name is not sensitive
-				APIKey:          encryptedAPIKey,
-				WebhookSecret:   encryptedWebhookSecret,
-				WebhookUsername: encryptedWebhookUsername,
-				WebhookPassword: encryptedWebhookPassword,
+				Site:             encryptedSecretData.Chargebee.Site, // Site name is not sensitive
+				APIKey:           encryptedAPIKey,
+				WebhookSecret:    encryptedWebhookSecret,
+				WebhookUsername:  encryptedWebhookUsername,
+				WebhookPassword:  encryptedWebhookPassword,
+				GatewayAccountID: encryptedSecretData.Chargebee.GatewayAccountID, // Not a secret
 			}
 		}
 

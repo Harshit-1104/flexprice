@@ -313,6 +313,9 @@ func convertConnectionMetadataToMap(encryptedSecretData types.ConnectionMetadata
 			if encryptedSecretData.Chargebee.WebhookPassword != "" {
 				result["webhook_password"] = encryptedSecretData.Chargebee.WebhookPassword
 			}
+			if encryptedSecretData.Chargebee.GatewayAccountID != "" {
+				result["gateway_account_id"] = encryptedSecretData.Chargebee.GatewayAccountID
+			}
 			return result
 		}
 	case types.SecretProviderRazorpay:
