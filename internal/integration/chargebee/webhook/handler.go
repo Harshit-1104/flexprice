@@ -3,11 +3,20 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
+	"github.com/flexprice/flexprice/internal/api/dto"
+	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/integration/chargebee"
+	"github.com/flexprice/flexprice/internal/interfaces"
 	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
 )
+
+// ServiceDependencies is the set of services a webhook needs to settle a payment.
+type ServiceDependencies = interfaces.ServiceDependencies
 
 // Handler handles Chargebee webhook events
 type Handler struct {
@@ -30,7 +39,7 @@ func NewHandler(
 }
 
 // HandleWebhookEvent processes a Chargebee webhook event
-func (h *Handler) HandleWebhookEvent(ctx context.Context, event *ChargebeeWebhookEvent, environmentID string) error {
+func (h *Handler) HandleWebhookEvent(ctx context.Context, event *ChargebeeWebhookEvent, environmentID string, services *ServiceDependencies) error {
 	h.logger.Info(ctx, "processing Chargebee webhook event",
 		"event_type", event.EventType,
 		"event_id", event.ID,
@@ -42,7 +51,9 @@ func (h *Handler) HandleWebhookEvent(ctx context.Context, event *ChargebeeWebhoo
 
 	switch eventType {
 	case EventPaymentSucceeded:
-		return h.handlePaymentSucceeded(ctx, event, environmentID)
+		return h.handlePaymentSucceeded(ctx, event, services)
+	case EventPaymentFailed:
+		return h.handlePaymentFailed(ctx, event, services)
 	default:
 		h.logger.Info(ctx, "unhandled Chargebee webhook event type", "type", event.EventType)
 		return nil // Not an error, just unhandled
@@ -50,25 +61,9 @@ func (h *Handler) HandleWebhookEvent(ctx context.Context, event *ChargebeeWebhoo
 }
 
 // handlePaymentSucceeded handles payment_succeeded webhook
-func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWebhookEvent, environmentID string) error {
-	// Parse the webhook content
-	var content ChargebeeWebhookContent
-	if err := json.Unmarshal(event.Content, &content); err != nil {
-		h.logger.Error(ctx, "failed to parse webhook content",
-			"error", err,
-			"event_id", event.ID)
-		return nil
-	}
-
-	if content.Transaction == nil {
-		h.logger.Info(ctx, "no transaction found in payment_succeeded event",
-			"event_id", event.ID)
-		return nil
-	}
-
-	if content.Invoice == nil {
-		h.logger.Info(ctx, "no invoice found in payment_succeeded event",
-			"event_id", event.ID)
+func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWebhookEvent, services *ServiceDependencies) error {
+	content, ok := h.parseContent(ctx, event)
+	if !ok {
 		return nil
 	}
 
@@ -94,6 +89,19 @@ func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWe
 		"flexprice_invoice_id", flexpriceInvoiceID,
 		"chargebee_invoice_id", invoice.ID,
 		"chargebee_transaction_id", transaction.ID)
+
+	// A checkout session owns settlement for its own invoice. ReconcileInvoicePayment
+	// below writes the invoice directly, bypassing the wallet_transaction_id hook that
+	// credits a purchased-credit top-up, and it adds to AmountPaid where the checkout
+	// path sets it absolutely — running both overpays and never credits. So route to
+	// exactly one of them.
+	handled, err := h.handleCheckoutSessionForPayment(ctx, flexpriceInvoiceID, transaction.ID, services)
+	if err != nil {
+		return nil // Already logged; don't fail webhook processing
+	}
+	if handled {
+		return nil
+	}
 
 	// Convert amount from cents to standard unit
 	paymentAmount := decimal.NewFromInt(transaction.Amount).Div(decimal.NewFromInt(100))
@@ -123,4 +131,156 @@ func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWe
 		"payment_amount", paymentAmount.String())
 
 	return nil
+}
+
+// handlePaymentFailed terminates the checkout session a failed payment belongs to,
+// releasing its idempotency key and the per-wallet pending guard. A failure outside
+// a checkout session is left to the invoice's own dunning.
+func (h *Handler) handlePaymentFailed(ctx context.Context, event *ChargebeeWebhookEvent, services *ServiceDependencies) error {
+	content, ok := h.parseContent(ctx, event)
+	if !ok {
+		return nil
+	}
+
+	flexpriceInvoiceID, err := h.invoiceSvc.GetFlexPriceInvoiceIDByChargebeeInvoiceID(ctx, content.Invoice.ID)
+	if err != nil {
+		h.logger.Info(ctx, "no FlexPrice invoice for failed Chargebee payment, ignoring",
+			"error", err,
+			"chargebee_invoice_id", content.Invoice.ID,
+			"event_id", event.ID)
+		return nil
+	}
+
+	session, err := h.findCheckoutSessionForInvoice(ctx, flexpriceInvoiceID, services)
+	if err != nil || session == nil {
+		return nil
+	}
+	if session.CheckoutStatus != types.CheckoutStatusPending {
+		return nil
+	}
+
+	reason := fmt.Errorf("chargebee payment failed for transaction %s", content.Transaction.ID)
+	if err := services.CheckoutSessionService.CleanupCheckoutSession(ctx, session.ID, reason); err != nil {
+		h.logger.Error(ctx, "failed to clean up checkout session on payment failure",
+			"error", err,
+			"session_id", session.ID,
+			"flexprice_invoice_id", flexpriceInvoiceID,
+			"chargebee_transaction_id", content.Transaction.ID)
+	}
+	return nil
+}
+
+// handleCheckoutSessionForPayment completes the pending checkout session this payment
+// belongs to. Returns false when the payment has no checkout session, i.e. it is an
+// ordinary invoice payment the caller should reconcile itself.
+func (h *Handler) handleCheckoutSessionForPayment(
+	ctx context.Context,
+	flexpriceInvoiceID string,
+	chargebeeTransactionID string,
+	services *ServiceDependencies,
+) (bool, error) {
+	session, err := h.findCheckoutSessionForInvoice(ctx, flexpriceInvoiceID, services)
+	if err != nil {
+		h.logger.Error(ctx, "failed to look up checkout session for payment",
+			"error", err,
+			"flexprice_invoice_id", flexpriceInvoiceID,
+			"chargebee_transaction_id", chargebeeTransactionID)
+		return false, err
+	}
+	if session == nil {
+		return false, nil
+	}
+
+	switch session.CheckoutStatus {
+	case types.CheckoutStatusPending:
+		err := services.CheckoutSessionService.CompleteCheckoutSession(ctx, session.ID, &types.CheckoutProviderResult{
+			ProviderPaymentIntentID: chargebeeTransactionID,
+			ProviderMetadata: map[string]string{
+				"chargebee_transaction_id": chargebeeTransactionID,
+			},
+		})
+		switch {
+		case err == nil:
+			h.logger.Info(ctx, "completed checkout session from chargebee webhook",
+				"session_id", session.ID,
+				"flexprice_invoice_id", flexpriceInvoiceID,
+				"chargebee_transaction_id", chargebeeTransactionID)
+		case ierr.IsAlreadyExists(err):
+			// At-least-once delivery: another delivery or a reconciler got there first.
+			h.logger.Info(ctx, "checkout session already completed",
+				"session_id", session.ID,
+				"chargebee_transaction_id", chargebeeTransactionID)
+		default:
+			h.logger.Error(ctx, "failed to complete checkout session",
+				"error", err,
+				"session_id", session.ID,
+				"flexprice_invoice_id", flexpriceInvoiceID,
+				"chargebee_transaction_id", chargebeeTransactionID)
+		}
+
+	default:
+		// Terminal session, money taken: the customer paid after we gave up. Phase 6
+		// adds the refund; until then this needs manual reconciliation.
+		h.logger.Error(ctx, "payment for a checkout session in a terminal state — manual reconciliation required",
+			"error", "session is not pending",
+			"session_id", session.ID,
+			"session_status", session.CheckoutStatus,
+			"flexprice_invoice_id", flexpriceInvoiceID,
+			"chargebee_transaction_id", chargebeeTransactionID)
+	}
+
+	return true, nil
+}
+
+// findCheckoutSessionForInvoice returns the checkout session that owns this invoice,
+// in any status. Nil means the invoice was not paid through a checkout session.
+//
+// Keyed on the invoice rather than the payment (as Razorpay does) because a Chargebee
+// webhook identifies a Flexprice entity only through the Chargebee invoice mapping.
+func (h *Handler) findCheckoutSessionForInvoice(
+	ctx context.Context,
+	flexpriceInvoiceID string,
+	services *ServiceDependencies,
+) (*dto.CheckoutSessionResponse, error) {
+	if services == nil || services.CheckoutSessionService == nil {
+		return nil, nil
+	}
+
+	filter := types.NewDefaultCheckoutSessionFilter()
+	filter.CheckoutInvoiceIDs = []string{flexpriceInvoiceID}
+	filter.Limit = lo.ToPtr(1)
+	filter.Status = lo.ToPtr(types.StatusPublished)
+
+	sessions, err := services.CheckoutSessionService.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if sessions == nil || len(sessions.Items) == 0 {
+		return nil, nil
+	}
+	return sessions.Items[0], nil
+}
+
+// parseContent decodes the event body, requiring both a transaction and an invoice.
+func (h *Handler) parseContent(ctx context.Context, event *ChargebeeWebhookEvent) (*ChargebeeWebhookContent, bool) {
+	var content ChargebeeWebhookContent
+	if err := json.Unmarshal(event.Content, &content); err != nil {
+		h.logger.Error(ctx, "failed to parse webhook content",
+			"error", err,
+			"event_id", event.ID)
+		return nil, false
+	}
+
+	if content.Transaction == nil {
+		h.logger.Info(ctx, "no transaction found in event content",
+			"event_id", event.ID, "event_type", event.EventType)
+		return nil, false
+	}
+	if content.Invoice == nil {
+		h.logger.Info(ctx, "no invoice found in event content",
+			"event_id", event.ID, "event_type", event.EventType)
+		return nil, false
+	}
+
+	return &content, true
 }

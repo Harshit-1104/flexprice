@@ -70,6 +70,9 @@ type ChargebeeConfig struct {
 	WebhookSecret   string // Webhook secret for verification (optional, NOT USED in v2)
 	WebhookUsername string // Basic Auth username for webhook verification (Chargebee v2 security)
 	WebhookPassword string // Basic Auth password for webhook verification (Chargebee v2 security)
+	// GatewayAccountID optionally pins where new cards are vaulted. Empty defers to
+	// the site's own gateway routing.
+	GatewayAccountID string
 }
 
 // NewClient creates a new Chargebee client
@@ -161,6 +164,10 @@ func (c *Client) GetDecryptedChargebeeConfig(conn *connection.Connection) (*Char
 		chargebeeConfig.WebhookPassword = webhookPassword
 	}
 
+	if gatewayAccountID, exists := decryptedMetadata["gateway_account_id"]; exists {
+		chargebeeConfig.GatewayAccountID = gatewayAccountID
+	}
+
 	c.logger.Info(context.Background(), "retrieved Chargebee config",
 		"site", chargebeeConfig.Site,
 		"has_api_key", chargebeeConfig.APIKey != "",
@@ -229,11 +236,12 @@ func (c *Client) decryptConnectionMetadata(conn *connection.Connection) (types.M
 		}
 
 		decryptedMetadata := types.Metadata{
-			"site":             site,
-			"api_key":          apiKey,
-			"webhook_secret":   webhookSecret,
-			"webhook_username": webhookUsername,
-			"webhook_password": webhookPassword,
+			"site":               site,
+			"api_key":            apiKey,
+			"webhook_secret":     webhookSecret,
+			"webhook_username":   webhookUsername,
+			"webhook_password":   webhookPassword,
+			"gateway_account_id": conn.EncryptedSecretData.Chargebee.GatewayAccountID,
 		}
 
 		c.logger.Info(context.Background(), "successfully decrypted chargebee credentials",

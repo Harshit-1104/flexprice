@@ -139,6 +139,13 @@ type ChargebeeConnectionMetadata struct {
 	WebhookSecret   string `json:"webhook_secret,omitempty"`   // Chargebee Webhook Secret (encrypted, optional, NOT USED in v2)
 	WebhookUsername string `json:"webhook_username,omitempty"` // Basic Auth username for webhooks (encrypted)
 	WebhookPassword string `json:"webhook_password,omitempty"` // Basic Auth password for webhooks (encrypted)
+	// GatewayAccountID optionally pins which gateway account NEW cards are vaulted
+	// against. Charging an existing card never needs it — the payment source carries
+	// its own gateway. Empty defers to the site's own routing, which is correct for a
+	// deliberately configured multi-gateway site; set it only to override that, e.g.
+	// when flow-specific defaults would otherwise split one customer's cards across
+	// gateways. Not a secret; not encrypted.
+	GatewayAccountID string `json:"gateway_account_id,omitempty"`
 }
 
 // isValidChargebeeSite reports whether s is a bare Chargebee site name.
