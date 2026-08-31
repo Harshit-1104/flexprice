@@ -10,6 +10,7 @@ import (
 	itemAction "github.com/chargebee/chargebee-go/v3/actions/item"
 	itemFamilyAction "github.com/chargebee/chargebee-go/v3/actions/itemfamily"
 	itemPriceAction "github.com/chargebee/chargebee-go/v3/actions/itemprice"
+	"github.com/chargebee/chargebee-go/v3/enum"
 	"github.com/chargebee/chargebee-go/v3/models/customer"
 	hostedPageModel "github.com/chargebee/chargebee-go/v3/models/hostedpage"
 	chargebeeInvoice "github.com/chargebee/chargebee-go/v3/models/invoice"
@@ -61,6 +62,9 @@ type ChargebeeClient interface {
 	RetrieveCustomer(ctx context.Context, chargebeeCustomerID string) (*customer.Customer, error)
 	RetrieveTransaction(ctx context.Context, transactionID string) (*transactionModel.Transaction, error)
 	RefundTransaction(ctx context.Context, transactionID string, amountMinor int64, idempotencyKey string) (*transactionModel.Transaction, error)
+	CreateManagePaymentSourcesPage(ctx context.Context, chargebeeCustomerID, redirectURL, gatewayAccountID string) (*hostedPageModel.HostedPage, error)
+	AssignPaymentRole(ctx context.Context, chargebeeCustomerID, paymentSourceID string, role enum.Role) error
+	DeletePaymentSource(ctx context.Context, paymentSourceID string) error
 }
 
 // Client handles Chargebee API client setup and configuration

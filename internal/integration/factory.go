@@ -1377,13 +1377,26 @@ func (f *Factory) GetS3Client(ctx context.Context) (*s3.Client, error) {
 }
 
 // GetSavedMethodProvider returns the SavedMethodProvider adapter for the given
-// gateway. No adapters exist yet, so every provider reports ErrNotImplemented; a
-// caller must treat that as "this provider cannot manage saved methods" rather
-// than as a failure, which is also the permanent answer for Razorpay.
+// gateway. ErrNotImplemented means the provider cannot manage saved methods at all
+// — the permanent answer for Razorpay, whose tokens need a mandate — and callers
+// must treat it as a capability answer rather than a failure.
 func (f *Factory) GetSavedMethodProvider(ctx context.Context, gateway types.PaymentGatewayType, customerSvc interfaces.CustomerService) (interfaces.SavedMethodProvider, error) {
-	return nil, ierr.NewError("saved payment methods are not supported for this provider").
-		WithHintf("%s cannot manage saved payment methods", gateway).
-		Mark(ierr.ErrNotImplemented)
+	switch gateway {
+	case types.PaymentGatewayTypeChargebee:
+		i, err := f.GetChargebeeIntegration(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &chargebee.PaymentMethodAdapter{
+			Client:      i.Client,
+			CustomerSvc: i.CustomerSvc.(*chargebee.CustomerService),
+			Logger:      f.logger,
+		}, nil
+	default:
+		return nil, ierr.NewError("saved payment methods are not supported for this provider").
+			WithHintf("%s cannot manage saved payment methods", gateway).
+			Mark(ierr.ErrNotImplemented)
+	}
 }
 
 // GetCheckoutProvider returns the CheckoutProvider adapter for the given payment provider.
