@@ -75,18 +75,24 @@ func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWe
 		"chargebee_invoice_id", invoice.ID,
 	)
 
-	// Get FlexPrice invoice ID from entity mapping via service method
+	// A hosted checkout page creates its own Chargebee invoice, which has no entity
+	// mapping — po_number carries the Flexprice payment id for those.
+	flexpricePaymentID := invoice.PONumber
 	flexpriceInvoiceID, err := h.invoiceSvc.GetFlexPriceInvoiceIDByChargebeeInvoiceID(ctx, invoice.ID)
 	if err != nil {
-		h.logger.Error(ctx, "failed to get FlexPrice invoice ID for Chargebee invoice",
-			"error", err,
-			"chargebee_invoice_id", invoice.ID,
-			"event_id", event.ID)
-		return nil // Don't fail webhook processing
+		if flexpricePaymentID == "" {
+			h.logger.Error(ctx, "failed to get FlexPrice invoice ID for Chargebee invoice and neither payment ID",
+				"error", err,
+				"chargebee_invoice_id", invoice.ID,
+				"event_id", event.ID)
+			return nil // Don't fail webhook processing
+		}
+		flexpriceInvoiceID = ""
 	}
 
-	h.logger.Info(ctx, "found FlexPrice invoice for payment",
+	h.logger.Info(ctx, "resolved flexprice entities for payment",
 		"flexprice_invoice_id", flexpriceInvoiceID,
+		"flexprice_payment_id", flexpricePaymentID,
 		"chargebee_invoice_id", invoice.ID,
 		"chargebee_transaction_id", transaction.ID)
 
@@ -95,11 +101,19 @@ func (h *Handler) handlePaymentSucceeded(ctx context.Context, event *ChargebeeWe
 	// credits a purchased-credit top-up, and it adds to AmountPaid where the checkout
 	// path sets it absolutely — running both overpays and never credits. So route to
 	// exactly one of them.
-	handled, err := h.handleCheckoutSessionForPayment(ctx, flexpriceInvoiceID, transaction.ID, services)
+	handled, err := h.handleCheckoutSessionForPayment(ctx, flexpricePaymentID, flexpriceInvoiceID, invoice.ID, transaction.ID, services)
 	if err != nil {
 		return nil // Already logged; don't fail webhook processing
 	}
 	if handled {
+		return nil
+	}
+
+	if flexpriceInvoiceID == "" {
+		h.logger.Info(ctx, "no checkout session and no mapped invoice for chargebee payment, ignoring",
+			"chargebee_invoice_id", invoice.ID,
+			"flexprice_payment_id", flexpricePaymentID,
+			"event_id", event.ID)
 		return nil
 	}
 
@@ -144,14 +158,17 @@ func (h *Handler) handlePaymentFailed(ctx context.Context, event *ChargebeeWebho
 
 	flexpriceInvoiceID, err := h.invoiceSvc.GetFlexPriceInvoiceIDByChargebeeInvoiceID(ctx, content.Invoice.ID)
 	if err != nil {
-		h.logger.Info(ctx, "no FlexPrice invoice for failed Chargebee payment, ignoring",
-			"error", err,
-			"chargebee_invoice_id", content.Invoice.ID,
-			"event_id", event.ID)
-		return nil
+		if content.Invoice.PONumber == "" {
+			h.logger.Info(ctx, "no FlexPrice invoice for failed Chargebee payment, ignoring",
+				"error", err,
+				"chargebee_invoice_id", content.Invoice.ID,
+				"event_id", event.ID)
+			return nil
+		}
+		flexpriceInvoiceID = ""
 	}
 
-	session, err := h.findCheckoutSessionForInvoice(ctx, flexpriceInvoiceID, services)
+	session, err := h.findCheckoutSessionForPayment(ctx, content.Invoice.PONumber, services)
 	if err != nil || session == nil {
 		return nil
 	}
@@ -175,11 +192,11 @@ func (h *Handler) handlePaymentFailed(ctx context.Context, event *ChargebeeWebho
 // ordinary invoice payment the caller should reconcile itself.
 func (h *Handler) handleCheckoutSessionForPayment(
 	ctx context.Context,
-	flexpriceInvoiceID string,
-	chargebeeTransactionID string,
+	flexpricePaymentID, flexpriceInvoiceID string,
+	chargebeeInvoiceID, chargebeeTransactionID string,
 	services *ServiceDependencies,
 ) (bool, error) {
-	session, err := h.findCheckoutSessionForInvoice(ctx, flexpriceInvoiceID, services)
+	session, err := h.findCheckoutSessionForPayment(ctx, flexpricePaymentID, services)
 	if err != nil {
 		h.logger.Error(ctx, "failed to look up checkout session for payment",
 			"error", err,
@@ -205,6 +222,14 @@ func (h *Handler) handleCheckoutSessionForPayment(
 				"session_id", session.ID,
 				"flexprice_invoice_id", flexpriceInvoiceID,
 				"chargebee_transaction_id", chargebeeTransactionID)
+
+			if err := h.invoiceSvc.LinkInvoiceMapping(ctx, *session.CheckoutInvoiceID, chargebeeInvoiceID); err != nil {
+				h.logger.Error(ctx, "failed to link chargebee invoice to flexprice invoice",
+					"error", err,
+					"session_id", session.ID,
+					"flexprice_invoice_id", *session.CheckoutInvoiceID,
+					"chargebee_invoice_id", chargebeeInvoiceID)
+			}
 		case ierr.IsAlreadyExists(err):
 			// At-least-once delivery: another delivery or a reconciler got there first.
 			h.logger.Info(ctx, "checkout session already completed",
@@ -232,22 +257,19 @@ func (h *Handler) handleCheckoutSessionForPayment(
 	return true, nil
 }
 
-// findCheckoutSessionForInvoice returns the checkout session that owns this invoice,
-// in any status. Nil means the invoice was not paid through a checkout session.
-//
-// Keyed on the invoice rather than the payment (as Razorpay does) because a Chargebee
-// webhook identifies a Flexprice entity only through the Chargebee invoice mapping.
-func (h *Handler) findCheckoutSessionForInvoice(
+// findCheckoutSessionForPayment returns the session that owns this payment, in any
+// status. Nil means the payment did not come from a checkout session.
+func (h *Handler) findCheckoutSessionForPayment(
 	ctx context.Context,
-	flexpriceInvoiceID string,
+	flexpricePaymentID string,
 	services *ServiceDependencies,
 ) (*dto.CheckoutSessionResponse, error) {
-	if services == nil || services.CheckoutSessionService == nil {
+	if flexpricePaymentID == "" || services == nil || services.CheckoutSessionService == nil {
 		return nil, nil
 	}
 
 	filter := types.NewDefaultCheckoutSessionFilter()
-	filter.CheckoutInvoiceIDs = []string{flexpriceInvoiceID}
+	filter.CheckoutPaymentIDs = []string{flexpricePaymentID}
 	filter.Limit = lo.ToPtr(1)
 	filter.Status = lo.ToPtr(types.StatusPublished)
 

@@ -24,6 +24,7 @@ const (
 	testChargebeeInvoiceID = "cb_inv_001"
 	testFlexpriceInvoiceID = "inv_flex_001"
 	testChargebeeTxnID     = "txn_001"
+	testFlexpricePaymentID = "pay_flex_001"
 )
 
 // ── entityintegrationmapping.Repository fake: maps one Chargebee invoice ─────
@@ -74,10 +75,7 @@ func (s *fakeCheckoutSessionService) List(_ context.Context, filter *types.Check
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
-	if s.session == nil || len(filter.CheckoutInvoiceIDs) == 0 {
-		return &dto.ListCheckoutSessionsResponse{}, nil
-	}
-	if filter.CheckoutInvoiceIDs[0] != testFlexpriceInvoiceID {
+	if s.session == nil || len(filter.CheckoutPaymentIDs) == 0 || filter.CheckoutPaymentIDs[0] != testFlexpricePaymentID {
 		return &dto.ListCheckoutSessionsResponse{}, nil
 	}
 	return &dto.ListCheckoutSessionsResponse{Items: []*dto.CheckoutSessionResponse{s.session}}, nil
@@ -144,7 +142,7 @@ func (s *ChargebeeWebhookCheckoutSuite) seedSession(status types.CheckoutStatus)
 func (s *ChargebeeWebhookCheckoutSuite) event(eventType ChargebeeEventType) *ChargebeeWebhookEvent {
 	content, err := json.Marshal(map[string]any{
 		"transaction": map[string]any{"id": testChargebeeTxnID, "amount": 10000, "currency_code": "USD"},
-		"invoice":     map[string]any{"id": testChargebeeInvoiceID},
+		"invoice":     map[string]any{"id": testChargebeeInvoiceID, "po_number": testFlexpricePaymentID},
 	})
 	s.Require().NoError(err)
 	return &ChargebeeWebhookEvent{ID: "ev_001", EventType: string(eventType), Content: content}
@@ -154,7 +152,7 @@ func (s *ChargebeeWebhookCheckoutSuite) event(eventType ChargebeeEventType) *Cha
 func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_PendingSessionIsCompleted() {
 	session := s.seedSession(types.CheckoutStatusPending)
 
-	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpriceInvoiceID, testChargebeeTxnID, s.services)
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 
 	s.Require().NoError(err)
 	s.True(handled, "a checkout payment must not fall through to invoice reconciliation")
@@ -166,7 +164,7 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_AlreadyCompletedIsN
 	s.seedSession(types.CheckoutStatusPending)
 	s.checkoutSvc.completeErr = ierr.NewError("already completed").Mark(ierr.ErrAlreadyExists)
 
-	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpriceInvoiceID, testChargebeeTxnID, s.services)
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 
 	s.Require().NoError(err)
 	s.True(handled)
@@ -174,7 +172,7 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_AlreadyCompletedIsN
 
 // An ordinary invoice payment has no session and must reconcile as before.
 func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_NoSessionFallsThrough() {
-	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpriceInvoiceID, testChargebeeTxnID, s.services)
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, "pay_no_session", testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 
 	s.Require().NoError(err)
 	s.False(handled, "a standalone payment must still reach ReconcileInvoicePayment")
@@ -185,7 +183,7 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_NoSessionFallsThrou
 func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_ExpiredSessionIsNotCompleted() {
 	s.seedSession(types.CheckoutStatusExpired)
 
-	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpriceInvoiceID, testChargebeeTxnID, s.services)
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 
 	s.Require().NoError(err)
 	s.True(handled, "must still not fall through: reconciling would credit an archived invoice")
@@ -196,7 +194,7 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_ExpiredSessionIsNot
 func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_LookupErrorDoesNotFallThrough() {
 	s.checkoutSvc.listErr = ierr.NewError("db down").Mark(ierr.ErrDatabase)
 
-	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpriceInvoiceID, testChargebeeTxnID, s.services)
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 
 	s.Require().Error(err)
 	s.False(handled)
@@ -231,4 +229,35 @@ func (s *ChargebeeWebhookCheckoutSuite) TestUnhandledEventTypeIsIgnored() {
 
 	s.Empty(s.checkoutSvc.completeCalls)
 	s.Empty(s.checkoutSvc.cleanupCalls)
+}
+
+// A hosted checkout page creates its own Chargebee invoice with no entity mapping.
+// po_number carries the Flexprice payment id — verified live against the test site.
+func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_HostedPageRoutesByPONumber() {
+	session := s.seedSession(types.CheckoutStatusPending)
+
+	handled, err := s.handler.handleCheckoutSessionForPayment(
+		s.ctx, testFlexpricePaymentID, "", testChargebeeInvoiceID, testChargebeeTxnID, s.services)
+
+	s.Require().NoError(err)
+	s.True(handled, "an unmapped hosted-page invoice must still find its session")
+	s.Equal([]string{session.ID}, s.checkoutSvc.completeCalls)
+}
+
+// End to end through HandleWebhookEvent: no invoice mapping exists, so routing must
+// come from po_number alone.
+func (s *ChargebeeWebhookCheckoutSuite) TestHostedPageWebhook_UnmappedInvoiceCompletesSession() {
+	session := s.seedSession(types.CheckoutStatusPending)
+
+	content, err := json.Marshal(map[string]any{
+		"transaction": map[string]any{"id": testChargebeeTxnID, "amount": 1000, "currency_code": "USD"},
+		"invoice":     map[string]any{"id": "cb_inv_unmapped", "po_number": testFlexpricePaymentID},
+	})
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.handler.HandleWebhookEvent(s.ctx, &ChargebeeWebhookEvent{
+		ID: "ev_hosted", EventType: string(EventPaymentSucceeded), Content: content,
+	}, "env_test", s.services))
+
+	s.Equal([]string{session.ID}, s.checkoutSvc.completeCalls)
 }
