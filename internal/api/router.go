@@ -680,9 +680,24 @@ func NewRouter(
 		customerPortalAPI.POST("/wallets", handlers.CustomerPortal.GetWallets)
 		customerPortalAPI.GET("/wallets/:id", handlers.CustomerPortal.GetWallet)
 		customerPortalAPI.GET("/wallets/:id/transactions", handlers.CustomerPortal.GetWalletTransactions)
+		customerPortalAPI.POST("/wallets/:id/top-up", handlers.CustomerPortal.TopUpWallet)
+		customerPortalAPI.PUT("/wallets/:id/auto-topup", handlers.CustomerPortal.UpdateAutoTopup)
 
-		// Portal config (theme, sections, tabs)
+		// Checkout
+		customerPortalAPI.GET("/checkout-sessions/:id", handlers.CustomerPortal.GetCheckoutSession)
+		customerPortalAPI.POST("/checkout-sessions/:id/cancel", handlers.CustomerPortal.CancelCheckoutSession)
+
+		// Payment methods
+		customerPortalAPI.GET("/payment-methods", handlers.CustomerPortal.ListPaymentMethods)
+		customerPortalAPI.POST("/payment-methods", handlers.CustomerPortal.AddPaymentMethod)
+		customerPortalAPI.DELETE("/payment-methods/:id", handlers.CustomerPortal.DeletePaymentMethod)
+		customerPortalAPI.POST("/payment-methods/:id/default", handlers.CustomerPortal.SetDefaultPaymentMethod)
+
+		// Portal config (theme, sections, tabs) — tenant-authored
 		customerPortalAPI.GET("/config", handlers.CustomerPortal.GetPortalConfig)
+
+		// Payment integrations — server-derived from the tenant's connections
+		customerPortalAPI.GET("/integrations", handlers.CustomerPortal.GetIntegrations)
 
 		// Analytics
 		customerPortalAPI.POST("/analytics/revenue", handlers.CustomerPortal.GetAnalytics)

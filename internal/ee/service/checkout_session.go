@@ -438,6 +438,8 @@ func (s *checkoutSessionService) createCheckoutPayment(ctx context.Context, inv 
 	switch provider {
 	case types.CheckoutPaymentProviderRazorpay:
 		gateway = types.PaymentGatewayTypeRazorpay
+	case types.CheckoutPaymentProviderChargebee:
+		gateway = types.PaymentGatewayTypeChargebee
 	default:
 		return nil, ierr.NewError("unsupported payment provider for checkout").
 			WithHint("No gateway mapping exists for this provider").

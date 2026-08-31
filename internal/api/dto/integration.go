@@ -89,7 +89,6 @@ type DelinkIntegrationMappingRequest struct {
 	ProviderType string                      `json:"provider_type" validate:"required"`
 }
 
-
 func (r *DelinkIntegrationMappingRequest) Validate() error {
 	if err := validator.ValidateRequest(r); err != nil {
 		return err
@@ -126,4 +125,22 @@ func EntityOnlySyncConfig(sc *types.SyncConfig) *types.SyncConfig {
 		Deal:         sc.Deal,
 		Quote:        sc.Quote,
 	}
+}
+
+type IntegrationCapability string
+
+const (
+	IntegrationCapabilityCheckout   IntegrationCapability = "checkout"
+	IntegrationCapabilityAutoCharge IntegrationCapability = "auto_charge"
+	IntegrationCapabilitySetDefault IntegrationCapability = "set_default"
+)
+
+type PaymentIntegration struct {
+	Provider     types.PaymentGatewayType `json:"provider"`
+	IsDefault    bool                     `json:"is_default"`
+	Capabilities []IntegrationCapability  `json:"capabilities"`
+}
+
+type IntegrationsResponse struct {
+	PaymentIntegrations []*PaymentIntegration `json:"payment_integrations"`
 }

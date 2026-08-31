@@ -8,18 +8,19 @@ import (
 type PaymentGatewayType string
 
 const (
-	PaymentGatewayTypeStripe   PaymentGatewayType = "stripe"
-	PaymentGatewayTypeRazorpay PaymentGatewayType = "razorpay"
-	PaymentGatewayTypeNomod    PaymentGatewayType = "nomod"
-	PaymentGatewayTypeMoyasar  PaymentGatewayType = "moyasar"
-	PaymentGatewayTypePaddle   PaymentGatewayType = "paddle"
-	PaymentGatewayTypeWhop     PaymentGatewayType = "whop"
+	PaymentGatewayTypeStripe    PaymentGatewayType = "stripe"
+	PaymentGatewayTypeRazorpay  PaymentGatewayType = "razorpay"
+	PaymentGatewayTypeNomod     PaymentGatewayType = "nomod"
+	PaymentGatewayTypeMoyasar   PaymentGatewayType = "moyasar"
+	PaymentGatewayTypePaddle    PaymentGatewayType = "paddle"
+	PaymentGatewayTypeWhop      PaymentGatewayType = "whop"
+	PaymentGatewayTypeChargebee PaymentGatewayType = "chargebee"
 )
 
 // Validate validates the payment gateway type
 func (p PaymentGatewayType) Validate() error {
 	switch p {
-	case PaymentGatewayTypeStripe, PaymentGatewayTypeRazorpay, PaymentGatewayTypeNomod, PaymentGatewayTypeMoyasar, PaymentGatewayTypePaddle, PaymentGatewayTypeWhop:
+	case PaymentGatewayTypeStripe, PaymentGatewayTypeRazorpay, PaymentGatewayTypeNomod, PaymentGatewayTypeMoyasar, PaymentGatewayTypePaddle, PaymentGatewayTypeWhop, PaymentGatewayTypeChargebee:
 		return nil
 	default:
 		return ierr.NewError("invalid payment gateway type").
@@ -27,6 +28,7 @@ func (p PaymentGatewayType) Validate() error {
 			WithReportableDetails(map[string]any{
 				"allowed": []PaymentGatewayType{
 					PaymentGatewayTypeStripe,
+					PaymentGatewayTypeChargebee,
 					PaymentGatewayTypeRazorpay,
 					PaymentGatewayTypeNomod,
 					PaymentGatewayTypeMoyasar,

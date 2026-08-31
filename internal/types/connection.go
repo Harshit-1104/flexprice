@@ -129,8 +129,13 @@ func (r *RazorpayConnectionMetadata) Validate() error {
 
 // ChargebeeConnectionMetadata represents Chargebee-specific connection metadata
 type ChargebeeConnectionMetadata struct {
-	Site            string `json:"site"`                       // Chargebee site name (not encrypted)
-	APIKey          string `json:"api_key"`                    // Chargebee API key (encrypted)
+	Site   string `json:"site"`    // Chargebee site name (not encrypted)
+	APIKey string `json:"api_key"` // Chargebee API key (encrypted)
+	// PublishableKey is Chargebee's scope-limited client-side key. Chargebee.js
+	// requires it (it becomes the _jsapi_key request param); without it every
+	// component call fails auth and gateway lookup. Safe to expose to the browser —
+	// verified it cannot read customers or list api keys.
+	PublishableKey  string `json:"publishable_key,omitempty"`
 	WebhookSecret   string `json:"webhook_secret,omitempty"`   // Chargebee Webhook Secret (encrypted, optional, NOT USED in v2)
 	WebhookUsername string `json:"webhook_username,omitempty"` // Basic Auth username for webhooks (encrypted)
 	WebhookPassword string `json:"webhook_password,omitempty"` // Basic Auth password for webhooks (encrypted)
@@ -387,19 +392,19 @@ var zohoEndpointSuffixes = []string{
 func ValidateZohoEndpoint(raw, field string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return ierr.NewError(field + " is required").
+		return ierr.NewError(field+" is required").
 			WithHintf("Zoho Books %s must be provided", field).
 			Mark(ierr.ErrValidation)
 	}
 
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return ierr.NewError(field + " must be a valid https URL").
+		return ierr.NewError(field+" must be a valid https URL").
 			WithHintf("Zoho Books %s must be an https URL", field).
 			Mark(ierr.ErrValidation)
 	}
 	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return ierr.NewError(field + " must be a bare origin").
+		return ierr.NewError(field+" must be a bare origin").
 			WithHintf("Zoho Books %s must be a scheme and host only, with no path, query, fragment, or credentials", field).
 			Mark(ierr.ErrValidation)
 	}

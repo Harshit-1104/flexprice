@@ -2,6 +2,7 @@ package dto
 
 import (
 	"strings"
+	"time"
 
 	"github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
@@ -330,4 +331,57 @@ func isValidURL(urlStr string) bool {
 	}
 
 	return true
+}
+
+type SetupActionType string
+
+const (
+	SetupActionRedirect SetupActionType = "redirect"
+	SetupActionNone     SetupActionType = "none"
+)
+
+type SetupAction struct {
+	Type      SetupActionType `json:"type"`
+	URL       string          `json:"url,omitempty"`
+	ExpiresAt *time.Time      `json:"expires_at,omitempty"`
+}
+
+type AddPaymentMethodResponse struct {
+	Provider types.PaymentGatewayType `json:"provider"`
+	Action   SetupAction              `json:"action"`
+}
+
+type ListSavedPaymentMethodsRequest struct {
+	Providers []types.PaymentGatewayType `form:"providers" json:"providers,omitempty"`
+}
+
+type SavedPaymentMethod struct {
+	ID            string                    `json:"id"`
+	Provider      types.PaymentGatewayType  `json:"provider"`
+	Type          types.PaymentMethodType   `json:"type"`
+	Status        types.PaymentMethodStatus `json:"status"`
+	Card          *SavedCardDetails         `json:"card,omitempty"`
+	IsDefault     bool                      `json:"is_default"`
+	CanAutoCharge bool                      `json:"can_auto_charge"`
+}
+
+type SavedCardDetails struct {
+	Brand    string `json:"brand,omitempty"`
+	Last4    string `json:"last4,omitempty"`
+	ExpMonth int    `json:"exp_month,omitempty"`
+	ExpYear  int    `json:"exp_year,omitempty"`
+}
+
+type ProviderSavedPaymentMethods struct {
+	Provider types.PaymentGatewayType `json:"provider"`
+	Items    []*SavedPaymentMethod    `json:"items"`
+	Error    *ProviderError           `json:"error,omitempty"`
+}
+
+type ProviderError struct {
+	Message string `json:"message"`
+}
+
+type SavedPaymentMethodsResponse struct {
+	Providers []*ProviderSavedPaymentMethods `json:"providers"`
 }

@@ -68,7 +68,8 @@ func (a CheckoutAction) Validate() error {
 type CheckoutPaymentProvider string
 
 const (
-	CheckoutPaymentProviderRazorpay CheckoutPaymentProvider = "razorpay"
+	CheckoutPaymentProviderRazorpay  CheckoutPaymentProvider = "razorpay"
+	CheckoutPaymentProviderChargebee CheckoutPaymentProvider = "chargebee"
 )
 
 func (p CheckoutPaymentProvider) String() string { return string(p) }
@@ -76,10 +77,11 @@ func (p CheckoutPaymentProvider) String() string { return string(p) }
 func (p CheckoutPaymentProvider) Validate() error {
 	allowed := []CheckoutPaymentProvider{
 		CheckoutPaymentProviderRazorpay,
+		CheckoutPaymentProviderChargebee,
 	}
 	if p != "" && !lo.Contains(allowed, p) {
 		return ierr.NewError("invalid checkout payment provider").
-			WithHint("Allowed values: razorpay").
+			WithHint("Allowed values: razorpay, chargebee").
 			WithReportableDetails(map[string]any{"allowed_values": allowed}).
 			Mark(ierr.ErrValidation)
 	}
