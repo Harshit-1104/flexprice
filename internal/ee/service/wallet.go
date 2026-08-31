@@ -102,6 +102,10 @@ type WalletService interface {
 	// CompletePurchasedCreditTransaction completes a pending wallet transaction when payment succeeds
 	CompletePurchasedCreditTransactionWithRetry(ctx context.Context, walletTransactionID string) error
 
+	// FailPurchasedCreditTransaction marks a pending purchased-credit transaction failed
+	// when its payment never settles. Balance-neutral: the pending path never credited.
+	FailPurchasedCreditTransaction(ctx context.Context, walletTransactionID, reason string) error
+
 	// TODO: Cleanup this method, moved to `EvaluateAlertsForWallet`
 	CheckWalletBalanceAlert(ctx context.Context, req *wallet.WalletBalanceAlertEvent) error
 
@@ -1382,6 +1386,108 @@ func (s *walletService) completePurchasedCreditTransaction(ctx context.Context, 
 	// This is async (Kafka) and non-fatal.
 	s.PublishWalletBalanceAlertEvent(ctx, tx.CustomerID, true, tx.WalletID)
 
+	return nil
+}
+
+// FailPurchasedCreditTransaction marks a pending purchased-credit transaction failed.
+//
+// Balance-neutral by construction: a pending purchased-credit transaction never
+// moved the balance, so there is nothing to reverse. Runs under the same wallet
+// lock as completion so a webhook settling the payment and a cleanup expiring the
+// session cannot both win.
+func (s *walletService) FailPurchasedCreditTransaction(ctx context.Context, walletTransactionID, reason string) error {
+	if walletTransactionID == "" {
+		return ierr.NewError("wallet transaction ID is required").
+			WithHint("Wallet transaction ID cannot be empty").
+			Mark(ierr.ErrValidation)
+	}
+
+	var failed bool
+	var walletID string
+
+	err := s.DB.WithTx(ctx, func(ctx context.Context) error {
+		tx, err := s.WalletRepo.GetTransactionByID(ctx, walletTransactionID)
+		if err != nil {
+			return ierr.WithError(err).
+				WithHint("Failed to get wallet transaction").
+				Mark(ierr.ErrNotFound)
+		}
+		walletID = tx.WalletID
+
+		if err := s.DB.LockWithWait(ctx, postgres.LockRequest{Key: tx.WalletID}); err != nil {
+			return ierr.WithError(err).
+				WithHint("Failed to acquire wallet lock").
+				Mark(ierr.ErrInternal)
+		}
+
+		// Re-read under the lock: a concurrent completer may have settled this
+		// transaction while we waited.
+		tx, err = s.WalletRepo.GetTransactionByID(ctx, walletTransactionID)
+		if err != nil {
+			return ierr.WithError(err).
+				WithHint("Failed to get wallet transaction").
+				Mark(ierr.ErrNotFound)
+		}
+
+		if tx.TxStatus == types.TransactionStatusFailed {
+			return nil
+		}
+		if tx.TxStatus != types.TransactionStatusPending {
+			return ierr.NewError("wallet transaction is not in pending state").
+				WithHint("Only pending transactions can be failed").
+				WithReportableDetails(map[string]interface{}{
+					"wallet_transaction_id": walletTransactionID,
+					"current_status":        tx.TxStatus,
+				}).
+				Mark(ierr.ErrInvalidOperation)
+		}
+
+		markFailed := func(t *wallet.Transaction) error {
+			t.TxStatus = types.TransactionStatusFailed
+			if reason != "" {
+				if t.Metadata == nil {
+					t.Metadata = types.Metadata{}
+				}
+				t.Metadata[types.WalletMetadataKeyFailureReason] = reason
+			}
+			t.UpdatedAt = time.Now().UTC()
+			return s.WalletRepo.UpdateTransaction(ctx, t)
+		}
+
+		if err := markFailed(tx); err != nil {
+			return ierr.WithError(err).
+				WithHint("Failed to update wallet transaction").
+				Mark(ierr.ErrInternal)
+		}
+
+		// A bonus grant earned from this purchase is pending on the same payment;
+		// leaving it behind would strand a credit that is never granted or failed.
+		bonusTx, err := s.WalletRepo.GetPendingTransactionByParent(ctx, tx.ID)
+		if err != nil && !ierr.IsNotFound(err) {
+			return err
+		}
+		if bonusTx != nil {
+			if err := markFailed(bonusTx); err != nil {
+				return ierr.WithError(err).
+					WithHint("Failed to update bonus wallet transaction").
+					Mark(ierr.ErrInternal)
+			}
+		}
+
+		failed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if failed {
+		s.Logger.Info(ctx, "failed purchased credit transaction",
+			"wallet_transaction_id", walletTransactionID,
+			"wallet_id", walletID,
+			"reason", reason,
+		)
+	}
 	return nil
 }
 

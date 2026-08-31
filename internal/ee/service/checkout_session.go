@@ -136,6 +136,18 @@ func (s *checkoutSessionService) Delete(ctx context.Context, id string) error {
 			Mark(ierr.ErrValidation)
 	}
 
+	session, err := s.CheckoutSessionRepo.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Archiving alone leaves checkout_status pending, so the row keeps holding its
+	// idempotency key and keeps blocking the per-wallet pending guard while being
+	// invisible to every service query. Reach a terminal state first.
+	if err := s.cleanupCheckoutSession(ctx, session, nil); err != nil {
+		return err
+	}
+
 	return s.CheckoutSessionRepo.Delete(ctx, id)
 }
 
@@ -202,6 +214,23 @@ func (s *checkoutSessionService) cleanupCheckoutSession(ctx context.Context, ses
 				s.Logger.Error(ctx, "failed to archive pending addon association",
 					"association_id", ref.AssociationID, "error", err)
 			}
+		}
+	}
+
+	// The pending wallet transaction is not reachable from any archived row, so
+	// without this it stays PENDING forever and wedges the auto-top-up guard.
+	if cfg.WalletTopupParams != nil && cfg.WalletTopupParams.WalletTransactionID != "" {
+		failureReason := "checkout session expired before payment"
+		if reason != nil {
+			failureReason = reason.Error()
+		}
+
+		walletSvc := NewWalletService(s.ServiceParams)
+		if err := walletSvc.FailPurchasedCreditTransaction(ctx, cfg.WalletTopupParams.WalletTransactionID, failureReason); err != nil {
+			s.Logger.Error(ctx, "failed to fail wallet top-up transaction during checkout cleanup",
+				"error", err,
+				"session_id", session.ID,
+				"wallet_transaction_id", cfg.WalletTopupParams.WalletTransactionID)
 		}
 	}
 
