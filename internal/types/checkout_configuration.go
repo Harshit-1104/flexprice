@@ -292,6 +292,13 @@ type CheckoutPaymentProviderConfig struct {
 	CollectionMethod CollectionMethod  `json:"collection_method,omitempty"`
 	PaymentMethod    PaymentMethodType `json:"payment_method,omitempty"`
 	MaxMandateLimit  *decimal.Decimal  `json:"max_mandate_limit,omitempty" swaggertype:"string"`
+
+	// CustomerPresent declares the charge as customer-initiated (CIT) rather than
+	// merchant-initiated (MIT). It changes which SCA/3DS exemptions the gateway may
+	// claim and who carries chargeback liability, so it must describe reality: true
+	// only when the customer is actually at the keyboard, as in a portal one-click
+	// top-up. Unattended charges (auto top-up, dunning) leave it false.
+	CustomerPresent bool `json:"customer_present,omitempty"`
 }
 
 func (c *CheckoutPaymentProviderConfig) Validate() error {

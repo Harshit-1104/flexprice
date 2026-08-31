@@ -49,6 +49,9 @@ type CheckoutProviderResponse struct {
 // AuthorizationLinkRequest is the unified input for mandate/authorization
 // registration across any provider that supports it.
 type AuthorizationLinkRequest struct {
+	// CustomerPresent declares an off-session charge as customer-initiated. Providers
+	// that cannot express CIT/MIT ignore it.
+	CustomerPresent bool
 	InvoiceID       string
 	CustomerID      string
 	PaymentID       string

@@ -65,6 +65,7 @@ func (s *customerPortalService) TopUpWallet(ctx context.Context, walletID string
 				PaymentProvider: *req.Checkout.PaymentProvider,
 				PaymentProviderConfig: &types.CheckoutPaymentProviderConfig{
 					CollectionMethod: collectionMethod,
+					CustomerPresent: true,
 				},
 			},
 			RedirectionParams: req.Checkout.RedirectionParams,

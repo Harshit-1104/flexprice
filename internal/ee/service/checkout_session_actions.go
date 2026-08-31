@@ -97,6 +97,7 @@ func (s *checkoutSessionService) callCheckoutProvider(
 		}
 
 		authReq := interfaces.AuthorizationLinkRequest{
+			CustomerPresent: cfg.CustomerPresent,
 			InvoiceID:       req.InvoiceID,
 			CustomerID:      req.CustomerID,
 			PaymentID:       req.PaymentID,
