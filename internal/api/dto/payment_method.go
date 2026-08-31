@@ -333,6 +333,9 @@ func isValidURL(urlStr string) bool {
 	return true
 }
 
+// Separate from types.PaymentActionType because adding a method is not a payment
+// and checkout_url/payment_link are payment vocabulary. Members are additive: a
+// client switching on Type keeps working when embedded flows are added.
 type SetupActionType string
 
 const (
@@ -346,25 +349,45 @@ type SetupAction struct {
 	ExpiresAt *time.Time      `json:"expires_at,omitempty"`
 }
 
+// Returns an action, not a method: nothing is vaulted yet when this is written.
+// Carries no provider vocabulary (no hosted_page id, no page type) so a Stripe or
+// server-to-server flow can use the same shape.
 type AddPaymentMethodResponse struct {
 	Provider types.PaymentGatewayType `json:"provider"`
 	Action   SetupAction              `json:"action"`
 }
 
+// Not paginated on purpose: methods are read live from each gateway, a customer
+// holds a handful, and no cursor spans providers — Stripe pages by opaque cursor,
+// Chargebee by numeric offset. Distinct from ListPaymentMethodsRequest above,
+// which is a single-provider Stripe query.
 type ListSavedPaymentMethodsRequest struct {
 	Providers []types.PaymentGatewayType `form:"providers" json:"providers,omitempty"`
 }
 
+// API projection of domain paymentmethod.PaymentMethod, minus GatewayMethodID
+// (the raw gateway token). Not PaymentMethodResponse above, which mirrors Stripe's
+// object. Instrument detail is type-discriminated: brand/last4 are card-only, a
+// UPI method has a VPA and ACH has a bank — read Type, then the matching field.
 type SavedPaymentMethod struct {
-	ID            string                    `json:"id"`
-	Provider      types.PaymentGatewayType  `json:"provider"`
-	Type          types.PaymentMethodType   `json:"type"`
-	Status        types.PaymentMethodStatus `json:"status"`
-	Card          *SavedCardDetails         `json:"card,omitempty"`
-	IsDefault     bool                      `json:"is_default"`
-	CanAutoCharge bool                      `json:"can_auto_charge"`
+	ID       string                    `json:"id"`
+	Provider types.PaymentGatewayType  `json:"provider"`
+	Type     types.PaymentMethodType   `json:"type"`
+	Status   types.PaymentMethodStatus `json:"status"`
+	Card     *SavedCardDetails         `json:"card,omitempty"`
+	// Which method to use when several are saved at this provider. Answers "which
+	// one", never "may we" — authorisation is per-request or from auto top-up.
+	// Scoped to the provider: two providers means two defaults.
+	IsDefault bool `json:"is_default"`
+	// Capability, not permission: could this be charged with nobody present.
+	// True for any active Chargebee or Stripe card (both vault off-session by
+	// construction); false for a Razorpay token without a mandate.
+	CanAutoCharge bool `json:"can_auto_charge"`
 }
 
+// Field names follow Stripe's card object; Chargebee says expiry_month/expiry_year
+// and adapters normalise. Distinct from CardDetails above, which is Stripe-shaped
+// and carries a fingerprint.
 type SavedCardDetails struct {
 	Brand    string `json:"brand,omitempty"`
 	Last4    string `json:"last4,omitempty"`
@@ -375,13 +398,18 @@ type SavedCardDetails struct {
 type ProviderSavedPaymentMethods struct {
 	Provider types.PaymentGatewayType `json:"provider"`
 	Items    []*SavedPaymentMethod    `json:"items"`
-	Error    *ProviderError           `json:"error,omitempty"`
+	// Set when this provider could not be read; the others still return. Keeps
+	// "no saved cards" distinguishable from "we could not ask", which an empty
+	// list cannot — the two need different UI.
+	Error *ProviderError `json:"error,omitempty"`
 }
 
 type ProviderError struct {
 	Message string `json:"message"`
 }
 
+// An array of groups rather than a map keyed by provider: a map cannot carry the
+// per-provider error, and JSON object key order is undefined.
 type SavedPaymentMethodsResponse struct {
 	Providers []*ProviderSavedPaymentMethods `json:"providers"`
 }

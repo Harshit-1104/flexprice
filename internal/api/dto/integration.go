@@ -127,6 +127,9 @@ func EntityOnlySyncConfig(sc *types.SyncConfig) *types.SyncConfig {
 	}
 }
 
+// Clients branch on capability, never on provider name — Stripe vaults cards but
+// has no hosted-checkout adapter, and Razorpay's unattended charging needs a
+// mandate. Only capabilities that actually differ between providers are modelled.
 type IntegrationCapability string
 
 const (
@@ -135,6 +138,10 @@ const (
 	IntegrationCapabilitySetDefault IntegrationCapability = "set_default"
 )
 
+// Derived from connections rows at read time, not stored alongside
+// CustomerPortalConfig: that blob is tenant-writable and a copy there could be
+// edited into a lie. Carries no client credentials — the portal drives every
+// provider through hosted links, so no browser initialises a provider SDK.
 type PaymentIntegration struct {
 	Provider     types.PaymentGatewayType `json:"provider"`
 	IsDefault    bool                     `json:"is_default"`
