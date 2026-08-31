@@ -628,15 +628,12 @@ func (s *InvoiceService) LinkInvoiceMapping(ctx context.Context, invoiceID, char
 
 // customerHasPaymentMethod checks if a Chargebee customer has a payment method
 func (s *InvoiceService) customerHasPaymentMethod(ctx context.Context, chargebeeCustomerID string) (bool, error) {
-	// Retrieve customer from Chargebee using client wrapper
-	result, err := s.Client.RetrieveCustomer(ctx, chargebeeCustomerID)
+	customer, err := s.Client.RetrieveCustomer(ctx, chargebeeCustomerID)
 	if err != nil {
 		return false, ierr.WithError(err).
 			WithHint("Failed to retrieve customer from Chargebee").
 			Mark(ierr.ErrInternal)
 	}
-
-	customer := result.Customer
 
 	// Check if customer has a primary payment source or payment method
 	hasPaymentMethod := customer.PrimaryPaymentSourceId != "" || customer.PaymentMethod != nil

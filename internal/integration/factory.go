@@ -376,15 +376,19 @@ func (f *Factory) GetChargebeeIntegration(ctx context.Context) (*ChargebeeIntegr
 		Logger:                       f.logger,
 	})
 
+	paymentSvc := chargebee.NewPaymentService(chargebeeClient, f.locker, f.logger)
+
 	// Create webhook handler
 	webhookHandler := chargebeewebhook.NewHandler(
 		chargebeeClient,
 		invoiceSvc.(*chargebee.InvoiceService),
+		paymentSvc,
 		f.logger,
 	)
 
 	return &ChargebeeIntegration{
 		Client:         chargebeeClient,
+		PaymentSvc:     paymentSvc,
 		ItemFamilySvc:  itemFamilySvc,
 		ItemSvc:        itemSvc,
 		ItemPriceSvc:   itemPriceSvc,
@@ -866,6 +870,7 @@ type ChargebeeIntegration struct {
 	ItemPriceSvc   chargebee.ChargebeeItemPriceService
 	CustomerSvc    chargebee.ChargebeeCustomerService
 	InvoiceSvc     chargebee.ChargebeeInvoiceService
+	PaymentSvc     *chargebee.PaymentService
 	PlanSyncSvc    chargebee.ChargebeePlanSyncService
 	WebhookHandler *chargebeewebhook.Handler
 }
@@ -1381,6 +1386,17 @@ func (f *Factory) GetCheckoutProvider(ctx context.Context, provider types.Checko
 			return nil, err
 		}
 		return &razorpay.CheckoutAdapter{Svc: i.PaymentSvc, CustomerSvc: customerSvc, InvoiceSvc: invoiceSvc}, nil
+	case types.CheckoutPaymentProviderChargebee:
+		i, err := f.GetChargebeeIntegration(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &chargebee.CheckoutAdapter{
+			Client:      i.Client,
+			CustomerSvc: i.CustomerSvc.(*chargebee.CustomerService),
+			InvoiceSvc:  i.InvoiceSvc.(*chargebee.InvoiceService),
+			Logger:      f.logger,
+		}, nil
 	default:
 		return nil, ierr.NewError("payment provider not supported for checkout").
 			WithHintf("%s does not support hosted checkout sessions", provider).

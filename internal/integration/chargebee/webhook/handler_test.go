@@ -13,6 +13,8 @@ import (
 	"github.com/flexprice/flexprice/internal/cache"
 	"github.com/shopspring/decimal"
 
+	transactionModel "github.com/chargebee/chargebee-go/v3/models/transaction"
+	transactionEnum "github.com/chargebee/chargebee-go/v3/models/transaction/enum"
 	"github.com/flexprice/flexprice/internal/api/dto"
 	domainCheckout "github.com/flexprice/flexprice/internal/domain/checkout"
 	"github.com/flexprice/flexprice/internal/domain/entityintegrationmapping"
@@ -100,21 +102,30 @@ func (s *fakeCheckoutSessionService) CleanupCheckoutSession(_ context.Context, s
 
 type refundClient struct {
 	chargebee.ChargebeeClient
-	amountUnrefunded int64
-	refundCalls      []int64
-	refundErr        error
+	amount         int64
+	amountRefunded int64
+	refundCalls    []int64
+	refundErr      error
 }
 
-func (c *refundClient) RetrieveTransaction(_ context.Context, _ string) (chargebee.RawResult, error) {
-	return chargebee.RawResult{"amount_unrefunded": float64(c.amountUnrefunded)}, nil
+func (c *refundClient) RetrieveTransaction(_ context.Context, _ string) (*transactionModel.Transaction, error) {
+	txn := &transactionModel.Transaction{Id: testChargebeeTxnID, Amount: c.amount}
+	if c.amountRefunded > 0 {
+		txn.LinkedRefunds = []*transactionModel.LinkedRefund{{
+			TxnId:     "txn_refund_000",
+			TxnStatus: transactionEnum.StatusSuccess,
+			TxnAmount: c.amountRefunded,
+		}}
+	}
+	return txn, nil
 }
 
-func (c *refundClient) RefundTransaction(_ context.Context, _ string, amountMinor int64, _ string) (chargebee.RawResult, error) {
+func (c *refundClient) RefundTransaction(_ context.Context, _ string, amountMinor int64, _ string) (*transactionModel.Transaction, error) {
 	c.refundCalls = append(c.refundCalls, amountMinor)
 	if c.refundErr != nil {
 		return nil, c.refundErr
 	}
-	return chargebee.RawResult{"id": "txn_refund_001"}, nil
+	return &transactionModel.Transaction{Id: "txn_refund_001"}, nil
 }
 
 // ── interfaces.PaymentService fake ───────────────────────────────────────────
@@ -180,7 +191,7 @@ func (s *ChargebeeWebhookCheckoutSuite) SetupTest() {
 		},
 	}
 
-	s.client = &refundClient{amountUnrefunded: 10000}
+	s.client = &refundClient{amount: 10000}
 	s.handler = NewHandler(s.client, invoiceSvc, chargebee.NewPaymentService(s.client, grantingLocker{}, log), log)
 	s.checkoutSvc = &fakeCheckoutSessionService{}
 	s.paymentSvc = &fakePaymentService{payment: &dto.PaymentResponse{
@@ -278,7 +289,7 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_AlreadyRefundedPaym
 // must not receive another refund submission.
 func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_FullyRefundedTransactionIsNotResubmitted() {
 	s.seedSession(types.CheckoutStatusExpired)
-	s.client.amountUnrefunded = 0
+	s.client.amountRefunded = 10000
 
 	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
 

@@ -518,10 +518,34 @@ type WalletTopupConfig struct {
 	// FreeCreditLimitPerTransaction is the maximum currency amount allowed for a single
 	// FREE_CREDIT_GRANT transaction. Zero means no limit is enforced.
 	FreeCreditLimitPerTransaction decimal.Decimal `json:"free_credit_limit_per_transaction" swaggertype:"string"`
+
+	// MinTopupAmountPerCurrency is the minimum currency amount accepted for a paid
+	// top-up, keyed by upper-case currency code. Absent currency = no minimum.
+	MinTopupAmountPerCurrency map[string]decimal.Decimal `json:"min_topup_amount_per_currency,omitempty" swaggertype:"object"`
+}
+
+// MinTopupAmount returns the configured minimum for a currency, or zero if unset.
+func (c WalletTopupConfig) MinTopupAmount(currency string) decimal.Decimal {
+	if len(c.MinTopupAmountPerCurrency) == 0 {
+		return decimal.Zero
+	}
+	if v, ok := c.MinTopupAmountPerCurrency[strings.ToUpper(currency)]; ok {
+		return v
+	}
+
+	return decimal.Zero
 }
 
 // Validate implements SettingConfig.
 func (c WalletTopupConfig) Validate() error {
+	for cur, amt := range c.MinTopupAmountPerCurrency {
+		if amt.IsNegative() {
+			return ierr.NewError("min_topup_amount_per_currency cannot be negative").
+				WithHint("Provide a non-negative minimum per currency").
+				WithReportableDetails(map[string]any{"currency": cur}).
+				Mark(ierr.ErrValidation)
+		}
+	}
 	if c.FreeCreditLimitPerTransaction.IsNegative() {
 		return ierr.NewError("free_credit_limit_per_transaction cannot be negative").
 			WithHint("Set to zero to disable the limit, or provide a positive value").
@@ -714,6 +738,9 @@ func GetDefaultSettings() (map[SettingKey]DefaultSettingValue, error) {
 
 	defaultWalletTopupConfig := WalletTopupConfig{
 		FreeCreditLimitPerTransaction: decimal.Zero,
+		MinTopupAmountPerCurrency: map[string]decimal.Decimal{
+			"USD": decimal.NewFromInt(1),
+		},
 	}
 	defaultWalletTopupConfigMap, err := utils.ToMap(defaultWalletTopupConfig)
 	if err != nil {

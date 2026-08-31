@@ -113,8 +113,8 @@ func (s *PaymentService) ensureRefunded(ctx context.Context, transactionID strin
 	if txn, err := s.client.RetrieveTransaction(ctx, transactionID); err != nil {
 		s.logger.Info(ctx, "failed to read chargebee transaction before refunding, proceeding anyway",
 			"chargebee_transaction_id", transactionID, "error", err)
-	} else if txn.Int("amount_unrefunded") == 0 {
-		s.logger.Info(ctx, "chargebee transaction has nothing left to refund, skipping duplicate submission",
+	} else if AmountRefunded(txn) >= txn.Amount {
+		s.logger.Info(ctx, "chargebee transaction is already fully refunded, skipping duplicate submission",
 			"chargebee_transaction_id", transactionID)
 		return "", nil
 	}
@@ -124,5 +124,5 @@ func (s *PaymentService) ensureRefunded(ctx context.Context, transactionID strin
 	if err != nil {
 		return "", err
 	}
-	return refund.Str("id"), nil
+	return refund.Id, nil
 }
