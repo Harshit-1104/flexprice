@@ -8,6 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/cache"
+	"github.com/shopspring/decimal"
 
 	"github.com/flexprice/flexprice/internal/api/dto"
 	domainCheckout "github.com/flexprice/flexprice/internal/domain/checkout"
@@ -92,6 +96,57 @@ func (s *fakeCheckoutSessionService) CleanupCheckoutSession(_ context.Context, s
 	return nil
 }
 
+// ── chargebee.ChargebeeClient fake: only the refund endpoints are exercised ──
+
+type refundClient struct {
+	chargebee.ChargebeeClient
+	amountUnrefunded int64
+	refundCalls      []int64
+	refundErr        error
+}
+
+func (c *refundClient) RetrieveTransaction(_ context.Context, _ string) (chargebee.RawResult, error) {
+	return chargebee.RawResult{"amount_unrefunded": float64(c.amountUnrefunded)}, nil
+}
+
+func (c *refundClient) RefundTransaction(_ context.Context, _ string, amountMinor int64, _ string) (chargebee.RawResult, error) {
+	c.refundCalls = append(c.refundCalls, amountMinor)
+	if c.refundErr != nil {
+		return nil, c.refundErr
+	}
+	return chargebee.RawResult{"id": "txn_refund_001"}, nil
+}
+
+// ── interfaces.PaymentService fake ───────────────────────────────────────────
+
+type fakePaymentService struct {
+	interfaces.PaymentService
+	payment    *dto.PaymentResponse
+	updateReqs []dto.UpdatePaymentRequest
+}
+
+func (s *fakePaymentService) GetPayment(_ context.Context, _ string) (*dto.PaymentResponse, error) {
+	return s.payment, nil
+}
+
+func (s *fakePaymentService) UpdatePayment(_ context.Context, _ string, req dto.UpdatePaymentRequest) (*dto.PaymentResponse, error) {
+	s.updateReqs = append(s.updateReqs, req)
+	return s.payment, nil
+}
+
+// ── cache.Locker fake: always grants the lock ────────────────────────────────
+
+type grantingLocker struct{}
+
+func (grantingLocker) AcquireLock(_ context.Context, _ string, _ time.Duration) (cache.Lock, error) {
+	return grantedLock{}, nil
+}
+
+type grantedLock struct{}
+
+func (grantedLock) AcquiredSuccessfully() bool      { return true }
+func (grantedLock) Release(_ context.Context) error { return nil }
+
 // ── suite ────────────────────────────────────────────────────────────────────
 
 type ChargebeeWebhookCheckoutSuite struct {
@@ -99,6 +154,8 @@ type ChargebeeWebhookCheckoutSuite struct {
 	ctx         context.Context
 	handler     *Handler
 	checkoutSvc *fakeCheckoutSessionService
+	paymentSvc  *fakePaymentService
+	client      *refundClient
 	services    *ServiceDependencies
 }
 
@@ -123,9 +180,16 @@ func (s *ChargebeeWebhookCheckoutSuite) SetupTest() {
 		},
 	}
 
-	s.handler = NewHandler(nil, invoiceSvc, log)
+	s.client = &refundClient{amountUnrefunded: 10000}
+	s.handler = NewHandler(s.client, invoiceSvc, chargebee.NewPaymentService(s.client, grantingLocker{}, log), log)
 	s.checkoutSvc = &fakeCheckoutSessionService{}
-	s.services = &ServiceDependencies{CheckoutSessionService: s.checkoutSvc}
+	s.paymentSvc = &fakePaymentService{payment: &dto.PaymentResponse{
+		ID:            testFlexpricePaymentID,
+		Amount:        decimal.NewFromInt(100),
+		Currency:      "USD",
+		PaymentStatus: types.PaymentStatusSucceeded,
+	}}
+	s.services = &ServiceDependencies{CheckoutSessionService: s.checkoutSvc, PaymentService: s.paymentSvc}
 }
 
 func (s *ChargebeeWebhookCheckoutSuite) seedSession(status types.CheckoutStatus) *dto.CheckoutSessionResponse {
@@ -179,8 +243,9 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_NoSessionFallsThrou
 	s.Empty(s.checkoutSvc.completeCalls)
 }
 
-// A late payment on a terminal session must not be completed. Phase 6 refunds it.
-func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_ExpiredSessionIsNotCompleted() {
+// A late payment on a terminal session must not be completed — the invoice and
+// payment are archived by then, so the money is refunded instead.
+func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_ExpiredSessionIsRefunded() {
 	s.seedSession(types.CheckoutStatusExpired)
 
 	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
@@ -188,6 +253,40 @@ func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_ExpiredSessionIsNot
 	s.Require().NoError(err)
 	s.True(handled, "must still not fall through: reconciling would credit an archived invoice")
 	s.Empty(s.checkoutSvc.completeCalls)
+	s.Equal([]int64{10000}, s.client.refundCalls, "the full payment amount, in minor units")
+
+	s.Require().Len(s.paymentSvc.updateReqs, 1)
+	s.Equal(string(types.PaymentStatusRefunded), *s.paymentSvc.updateReqs[0].PaymentStatus)
+	s.Require().NotNil(s.paymentSvc.updateReqs[0].RefundedAt)
+	s.Equal("txn_refund_001", (*s.paymentSvc.updateReqs[0].Metadata)["chargebee_refund_id"])
+}
+
+// A redelivered webhook must not refund twice.
+func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_AlreadyRefundedPaymentIsNotRefundedAgain() {
+	s.seedSession(types.CheckoutStatusFailed)
+	s.paymentSvc.payment.PaymentStatus = types.PaymentStatusRefunded
+
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
+
+	s.Require().NoError(err)
+	s.True(handled)
+	s.Empty(s.client.refundCalls)
+	s.Empty(s.paymentSvc.updateReqs)
+}
+
+// Chargebee itself is the second guard: a transaction with nothing left to refund
+// must not receive another refund submission.
+func (s *ChargebeeWebhookCheckoutSuite) TestPaymentSucceeded_FullyRefundedTransactionIsNotResubmitted() {
+	s.seedSession(types.CheckoutStatusExpired)
+	s.client.amountUnrefunded = 0
+
+	handled, err := s.handler.handleCheckoutSessionForPayment(s.ctx, testFlexpricePaymentID, testFlexpriceInvoiceID, testChargebeeInvoiceID, testChargebeeTxnID, s.services)
+
+	s.Require().NoError(err)
+	s.True(handled)
+	s.Empty(s.client.refundCalls)
+	s.Require().Len(s.paymentSvc.updateReqs, 1, "the FlexPrice payment still has to be marked refunded")
+	s.Nil(s.paymentSvc.updateReqs[0].Metadata, "no refund id to record when nothing was submitted")
 }
 
 // A lookup failure must not silently fall through to the double-counting path.

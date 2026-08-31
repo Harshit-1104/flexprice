@@ -98,7 +98,8 @@ const (
 	// Used by both API (acquire) and Temporal activity (release); do not change without updating both.
 	PrefixPriceSyncLock             = "price_sync:plan:"
 	PrefixRazorpayWebhookRefundLock = "razorpay:webhook-refund:"
-	PrefixTabsInvoiceSyncLock       = "tabs:invoice_sync:"
+	PrefixChargebeeWebhookRefundLock = "chargebee:webhook-refund:"
+	PrefixTabsInvoiceSyncLock        = "tabs:invoice_sync:"
 	// PrefixStripeCustomerSyncLock guards first-time Stripe customer creation for a
 	// FlexPrice customer (used with customerID) so concurrent callers cannot each
 	// create their own Stripe customer.

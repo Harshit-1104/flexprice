@@ -22,6 +22,7 @@ type ServiceDependencies = interfaces.ServiceDependencies
 type Handler struct {
 	client     chargebee.ChargebeeClient
 	invoiceSvc *chargebee.InvoiceService
+	paymentSvc *chargebee.PaymentService
 	logger     *logger.Logger
 }
 
@@ -29,11 +30,13 @@ type Handler struct {
 func NewHandler(
 	client chargebee.ChargebeeClient,
 	invoiceSvc *chargebee.InvoiceService,
+	paymentSvc *chargebee.PaymentService,
 	logger *logger.Logger,
 ) *Handler {
 	return &Handler{
 		client:     client,
 		invoiceSvc: invoiceSvc,
+		paymentSvc: paymentSvc,
 		logger:     logger,
 	}
 }
@@ -223,12 +226,16 @@ func (h *Handler) handleCheckoutSessionForPayment(
 				"flexprice_invoice_id", flexpriceInvoiceID,
 				"chargebee_transaction_id", chargebeeTransactionID)
 
-			if err := h.invoiceSvc.LinkInvoiceMapping(ctx, *session.CheckoutInvoiceID, chargebeeInvoiceID); err != nil {
-				h.logger.Error(ctx, "failed to link chargebee invoice to flexprice invoice",
-					"error", err,
-					"session_id", session.ID,
-					"flexprice_invoice_id", *session.CheckoutInvoiceID,
-					"chargebee_invoice_id", chargebeeInvoiceID)
+			// A session without a checkout invoice has nothing to map the Chargebee
+			// invoice onto.
+			if invoiceID := lo.FromPtr(session.CheckoutInvoiceID); invoiceID != "" {
+				if err := h.invoiceSvc.LinkInvoiceMapping(ctx, invoiceID, chargebeeInvoiceID); err != nil {
+					h.logger.Error(ctx, "failed to link chargebee invoice to flexprice invoice",
+						"error", err,
+						"session_id", session.ID,
+						"flexprice_invoice_id", invoiceID,
+						"chargebee_invoice_id", chargebeeInvoiceID)
+				}
 			}
 		case ierr.IsAlreadyExists(err):
 			// At-least-once delivery: another delivery or a reconciler got there first.
@@ -243,11 +250,21 @@ func (h *Handler) handleCheckoutSessionForPayment(
 				"chargebee_transaction_id", chargebeeTransactionID)
 		}
 
+	case types.CheckoutStatusExpired, types.CheckoutStatusFailed:
+		// The hosted page outlives the session, so the customer paid after we gave up.
+		// The invoice and payment are archived by then and nothing can be delivered
+		// for the money — give it back.
+		if err := h.paymentSvc.RefundLateCapturedPayment(ctx, flexpricePaymentID, chargebeeTransactionID, services.PaymentService); err != nil {
+			h.logger.Error(ctx, "failed to refund late-captured payment — manual reconciliation required",
+				"error", err,
+				"session_id", session.ID,
+				"session_status", session.CheckoutStatus,
+				"flexprice_payment_id", flexpricePaymentID,
+				"chargebee_transaction_id", chargebeeTransactionID)
+		}
+
 	default:
-		// Terminal session, money taken: the customer paid after we gave up. Phase 6
-		// adds the refund; until then this needs manual reconciliation.
-		h.logger.Error(ctx, "payment for a checkout session in a terminal state — manual reconciliation required",
-			"error", "session is not pending",
+		h.logger.Info(ctx, "checkout session in non-actionable status, ignoring webhook",
 			"session_id", session.ID,
 			"session_status", session.CheckoutStatus,
 			"flexprice_invoice_id", flexpriceInvoiceID,
