@@ -357,6 +357,40 @@ func (h *CustomerPortalHandler) UpdateAutoTopup(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+// PayInvoice godoc
+// @Summary Pay an invoice via a provider-hosted payment link
+// @ID portalPayInvoice
+// @Tags Customer Portal
+// @Accept json
+// @Produce json
+// @Param id path string true "Invoice ID"
+// @Param request body dto.PortalPayInvoiceRequest true "Payment request"
+// @Success 200 {object} dto.PortalPayInvoiceResponse
+// @Failure 400 {object} ierr.ErrorResponse
+// @Failure 403 {object} ierr.ErrorResponse
+// @Failure 404 {object} ierr.ErrorResponse
+// @Failure 409 {object} ierr.ErrorResponse
+// @x-scope "write"
+// @Router /customer/portal/invoices/{id}/pay [post]
+func (h *CustomerPortalHandler) PayInvoice(c *gin.Context) {
+	invoiceID := c.Param("id")
+	if invoiceID == "" {
+		c.Error(ierr.NewError("invoice_id is required").Mark(ierr.ErrValidation))
+		return
+	}
+	var req dto.PortalPayInvoiceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(ierr.WithError(err).Mark(ierr.ErrValidation))
+		return
+	}
+	resp, err := h.portalService.PayInvoice(c.Request.Context(), invoiceID, &req)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
 // ListPaymentMethods godoc
 // @Summary List the customer's saved payment methods
 // @ID portalListPaymentMethods

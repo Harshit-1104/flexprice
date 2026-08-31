@@ -53,6 +53,9 @@ type CustomerPortalService interface {
 	GetCheckoutSession(ctx context.Context, sessionID string) (*dto.PortalCheckoutSessionResponse, error)
 	CancelCheckoutSession(ctx context.Context, sessionID string) (*dto.PortalCheckoutSessionResponse, error)
 
+	// Invoices
+	PayInvoice(ctx context.Context, invoiceID string, req *dto.PortalPayInvoiceRequest) (*dto.PortalPayInvoiceResponse, error)
+
 	// Payment methods
 	ListPaymentMethods(ctx context.Context, req *dto.ListSavedPaymentMethodsRequest) (*dto.SavedPaymentMethodsResponse, error)
 	AddPaymentMethod(ctx context.Context, req *dto.PortalAddPaymentMethodRequest) (*dto.AddPaymentMethodResponse, error)

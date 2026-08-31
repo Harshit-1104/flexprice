@@ -56,3 +56,19 @@ type PortalUpdateAutoTopupRequest struct {
 	Amount    *decimal.Decimal `json:"amount,omitempty" swaggertype:"string"`
 	Cooldown  *types.Duration  `json:"cooldown,omitempty"`
 }
+
+type PortalPayInvoiceRequest struct {
+	RedirectionParams
+	PaymentProvider *types.PaymentGatewayType `json:"payment_provider,omitempty"`
+	UseSavedMethod  bool                      `json:"use_saved_method,omitempty"`
+	IdempotencyKey  *string                   `json:"idempotency_key,omitempty"`
+}
+
+type PortalPayInvoiceResponse struct {
+	PaymentID     string               `json:"payment_id"`
+	InvoiceID     string               `json:"invoice_id"`
+	Status        types.PaymentStatus  `json:"status"`
+	Amount        decimal.Decimal      `json:"amount" swaggertype:"string"`
+	Currency      string               `json:"currency"`
+	PaymentAction *types.PaymentAction `json:"payment_action,omitempty"`
+}
