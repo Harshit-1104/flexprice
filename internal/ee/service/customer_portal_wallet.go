@@ -31,14 +31,16 @@ func (s *customerPortalService) TopUpWallet(ctx context.Context, walletID string
 
 	// Everything the portal customer must not choose is pinned here, not taken
 	// from the request: reason (so they cannot grant themselves free credits),
-	// expiry (none), priority (nil -> consumed after prioritized grants), and
-	// the provider config.
+	// expiry (none), priority (nil -> consumed after prioritized grants), the
+	// provider config, and auto-complete (which would grant credits before the
+	// invoice is paid).
 	walletReq := &dto.TopUpWalletRequest{
 		CreditsToAdd:      req.CreditsToAdd,
 		Amount:            req.Amount,
 		TransactionReason: types.TransactionReasonPurchasedCreditInvoiced,
 		IdempotencyKey:    req.IdempotencyKey,
 		Description:       req.Description,
+		TriggeringActor:   types.TriggeringActorEndCustomer,
 	}
 	if walletReq.Description == "" {
 		walletReq.Description = "Wallet top-up from customer portal"
@@ -190,21 +192,10 @@ func (s *customerPortalService) requireAutoChargeableMethod(ctx context.Context,
 func (s *customerPortalService) resolveCheckoutProvider(
 	ctx context.Context,
 	customerID string,
-	requested *types.CheckoutPaymentProvider,
+	requested *types.PaymentGatewayType,
 ) (types.CheckoutPaymentProvider, error) {
-	var requestedGateway types.PaymentGatewayType
-	if requested != nil && *requested != "" {
-		gw, ok := requested.ToPaymentGateway()
-		if !ok {
-			return "", ierr.NewError("unsupported payment provider for checkout").
-				WithHintf("%s cannot host a checkout", *requested).
-				Mark(ierr.ErrValidation)
-		}
-		requestedGateway = gw
-	}
-
 	resolved, err := NewPaymentProviderResolver(s.ServiceParams).
-		ResolveProvider(ctx, customerID, types.IntegrationCapabilityCheckout, requestedGateway)
+		ResolveProvider(ctx, customerID, types.IntegrationCapabilityCheckout, lo.FromPtr(requested))
 	if err != nil {
 		return "", err
 	}
@@ -231,7 +222,7 @@ func (s *customerPortalService) pendingTopupSession(
 	if len(existing) == 0 {
 		return nil, nil
 	}
-	
+
 	return toPortalCheckoutSession(dto.ToCheckoutSessionResponse(existing[0])), nil
 }
 

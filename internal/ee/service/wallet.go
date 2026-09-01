@@ -844,8 +844,10 @@ func (s *walletService) handlePurchasedCreditInvoicedTransaction(ctx context.Con
 	}
 
 	// Check if auto-complete is enabled. Pay-first checkout always forces pending
-	// so credits are not applied before payment succeeds.
-	autoCompleteEnabled := invoiceConfig.AutoCompletePurchasedCreditTransaction && !isPayFirst
+	// so credits are not applied before payment succeeds, and so does a top-up an
+	// end customer drove themselves.
+	autoCompleteEnabled := invoiceConfig.AutoCompletePurchasedCreditTransaction &&
+		!isPayFirst && !req.TriggeringActor.IsEndCustomer()
 
 	s.Logger.Debug(ctx, "processing purchased credit transaction",
 		"wallet_id", walletID,

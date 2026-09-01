@@ -9,10 +9,12 @@ import (
 	"github.com/flexprice/flexprice/internal/api/dto"
 	domainCheckout "github.com/flexprice/flexprice/internal/domain/checkout"
 	"github.com/flexprice/flexprice/internal/domain/connection"
+	"github.com/flexprice/flexprice/internal/domain/settings"
 	"github.com/flexprice/flexprice/internal/domain/wallet"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/testutil"
 	"github.com/flexprice/flexprice/internal/types"
+	"github.com/flexprice/flexprice/internal/utils"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/suite"
@@ -59,17 +61,41 @@ func (s *PortalWalletSuite) TearDownTest() {
 func (s *PortalWalletSuite) buildParams() ServiceParams {
 	stores := s.GetStores()
 	return ServiceParams{
-		Logger:              s.GetLogger(),
-		Config:              s.GetConfig(),
-		DB:                  s.GetDB(),
-		ConnectionRepo:      stores.ConnectionRepo,
-		CustomerRepo:        stores.CustomerRepo,
-		WalletRepo:          stores.WalletRepo,
-		CheckoutSessionRepo: stores.CheckoutSessionRepo,
-		SettingsRepo:        stores.SettingsRepo,
-		IntegrationFactory:  s.GetIntegrationFactory(),
-		WebhookPublisher:    s.GetWebhookPublisher(),
-		EventPublisher:      s.GetPublisher(),
+		Logger:                       s.GetLogger(),
+		Config:                       s.GetConfig(),
+		DB:                           s.GetDB(),
+		SubRepo:                      stores.SubscriptionRepo,
+		SubscriptionLineItemRepo:     stores.SubscriptionLineItemRepo,
+		PlanRepo:                     stores.PlanRepo,
+		PriceRepo:                    stores.PriceRepo,
+		PriceUnitRepo:                stores.PriceUnitRepo,
+		EventRepo:                    stores.EventRepo,
+		MeterRepo:                    stores.MeterRepo,
+		CustomerRepo:                 stores.CustomerRepo,
+		InvoiceRepo:                  stores.InvoiceRepo,
+		InvoiceLineItemRepo:          stores.InvoiceLineItemRepo,
+		EnvironmentRepo:              stores.EnvironmentRepo,
+		TenantRepo:                   stores.TenantRepo,
+		WalletRepo:                   stores.WalletRepo,
+		PaymentRepo:                  stores.PaymentRepo,
+		CreditGrantRepo:              stores.CreditGrantRepo,
+		CreditGrantApplicationRepo:   stores.CreditGrantApplicationRepo,
+		CouponRepo:                   stores.CouponRepo,
+		CouponAssociationRepo:        stores.CouponAssociationRepo,
+		CouponApplicationRepo:        stores.CouponApplicationRepo,
+		ConnectionRepo:               stores.ConnectionRepo,
+		SettingsRepo:                 stores.SettingsRepo,
+		TaxAssociationRepo:           stores.TaxAssociationRepo,
+		TaxRateRepo:                  stores.TaxRateRepo,
+		TaxAppliedRepo:               stores.TaxAppliedRepo,
+		AlertLogsRepo:                stores.AlertLogsRepo,
+		CheckoutSessionRepo:          stores.CheckoutSessionRepo,
+		EntityIntegrationMappingRepo: stores.EntityIntegrationMappingRepo,
+		EventPublisher:               s.GetPublisher(),
+		WebhookPublisher:             s.GetWebhookPublisher(),
+		ProrationCalculator:          s.GetCalculator(),
+		IntegrationFactory:           s.GetIntegrationFactory(),
+		WalletBalanceAlertPubSub:     types.WalletBalanceAlertPubSub{PubSub: testutil.NewInMemoryPubSub()},
 	}
 }
 
@@ -115,7 +141,7 @@ func (s *PortalWalletSuite) TestTopUpHonoursNamedProvider() {
 	s.connect(types.SecretProviderChargebee, types.SecretProviderRazorpay)
 
 	provider, err := s.svc.(*customerPortalService).
-		resolveCheckoutProvider(s.ctx, "cust_portal", lo.ToPtr(types.CheckoutPaymentProviderRazorpay))
+		resolveCheckoutProvider(s.ctx, "cust_portal", lo.ToPtr(types.PaymentGatewayTypeRazorpay))
 
 	s.NoError(err)
 	s.Equal(types.CheckoutPaymentProviderRazorpay, provider)
@@ -213,4 +239,41 @@ func (s *PortalWalletSuite) TestAutoTopupRequiresWalletOwnership() {
 	_, err := s.svc.UpdateAutoTopup(other, s.walletID, &dto.PortalUpdateAutoTopupRequest{})
 	s.Error(err)
 	s.True(ierr.IsPermissionDenied(err))
+}
+
+// A customer-initiated top-up must never grant credits before the invoice is paid,
+// even on a tenant that has auto-complete switched on for its own admin top-ups.
+func (s *PortalWalletSuite) TestTopUpNeverAutoCompletesForPortalCustomers() {
+	s.enableAutoCompletePurchasedCredit()
+
+	resp, err := s.svc.TopUpWallet(s.ctx, s.walletID, &dto.PortalTopUpWalletRequest{
+		CreditsToAdd:   decimal.NewFromInt(5),
+		IdempotencyKey: lo.ToPtr("idem_no_autocomplete"),
+	})
+
+	s.NoError(err)
+	s.Require().NotNil(resp.WalletTransaction)
+	s.Equal(types.TransactionStatusPending, resp.WalletTransaction.TxStatus,
+		"portal top-up must stay pending until the invoice is paid")
+
+	w, err := s.GetStores().WalletRepo.GetWalletByID(s.ctx, s.walletID)
+	s.NoError(err)
+	s.True(w.CreditBalance.Equal(decimal.NewFromInt(10)),
+		"credits must not land before payment, got %s", w.CreditBalance)
+}
+
+func (s *PortalWalletSuite) enableAutoCompletePurchasedCredit() {
+	cfg := types.InvoiceConfig{AutoCompletePurchasedCreditTransaction: true}
+	raw, err := utils.ToMap(cfg)
+	s.Require().NoError(err)
+
+	setting := &settings.Setting{
+		ID:            "setting_invoice_config",
+		Key:           types.SettingKeyInvoiceConfig,
+		Value:         raw,
+		EnvironmentID: types.GetEnvironmentID(s.ctx),
+		BaseModel:     types.GetDefaultBaseModel(s.ctx),
+	}
+	setting.Status = types.StatusPublished
+	s.Require().NoError(s.GetStores().SettingsRepo.Create(s.ctx, setting))
 }
