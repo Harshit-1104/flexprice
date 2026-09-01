@@ -19,11 +19,11 @@ type PaymentMethodAdapter struct {
 	Logger      *logger.Logger
 }
 
-func (a *PaymentMethodAdapter) Capabilities() []types.IntegrationCapability {
-	return []types.IntegrationCapability{
+func (a *PaymentMethodAdapter) Capabilities() []types.IntegrationCapabilityType {
+	return []types.IntegrationCapabilityType{
 		types.IntegrationCapabilityCheckout,
 		types.IntegrationCapabilityAutoCharge,
-		types.IntegrationCapabilitySetDefault,
+		types.IntegrationCapabilitySetDefaultMethod,
 	}
 }
 

@@ -66,3 +66,26 @@ const (
 	WebhookEventTypeSubscriptionDeleted                  WebhookEventType = "customer.subscription.deleted"
 	WebhookEventTypePaymentIntentSucceeded               WebhookEventType = "payment_intent.succeeded"
 )
+
+// PaymentGatewayFromSecretProvider maps a connection's provider onto the gateway
+// it configures. ok=false means the provider is not a payment gateway.
+func PaymentGatewayFromSecretProvider(p SecretProvider) (PaymentGatewayType, bool) {
+	switch p {
+	case SecretProviderStripe:
+		return PaymentGatewayTypeStripe, true
+	case SecretProviderRazorpay:
+		return PaymentGatewayTypeRazorpay, true
+	case SecretProviderNomod:
+		return PaymentGatewayTypeNomod, true
+	case SecretProviderMoyasar:
+		return PaymentGatewayTypeMoyasar, true
+	case SecretProviderPaddle:
+		return PaymentGatewayTypePaddle, true
+	case SecretProviderWhop:
+		return PaymentGatewayTypeWhop, true
+	case SecretProviderChargebee:
+		return PaymentGatewayTypeChargebee, true
+	default:
+		return "", false
+	}
+}

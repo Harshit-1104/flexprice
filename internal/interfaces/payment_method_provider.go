@@ -24,7 +24,7 @@ type SavedMethodProvider interface {
 
 	// Capabilities reports what this provider supports, so callers branch on
 	// capability rather than on provider name.
-	Capabilities() []types.IntegrationCapability
+	Capabilities() []types.IntegrationCapabilityType
 }
 
 // SetupLinkRequest asks a provider for a hosted add-a-payment-method page.

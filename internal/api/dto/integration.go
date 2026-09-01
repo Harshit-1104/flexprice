@@ -127,12 +127,17 @@ func EntityOnlySyncConfig(sc *types.SyncConfig) *types.SyncConfig {
 	}
 }
 
-type IntegrationCapability = types.IntegrationCapability
+type (
+	IntegrationCapability     = types.IntegrationCapability
+	IntegrationCapabilityType = types.IntegrationCapabilityType
+)
 
 const (
-	IntegrationCapabilityCheckout   = types.IntegrationCapabilityCheckout
-	IntegrationCapabilityAutoCharge = types.IntegrationCapabilityAutoCharge
-	IntegrationCapabilitySetDefault = types.IntegrationCapabilitySetDefault
+	IntegrationCapabilityCheckout                = types.IntegrationCapabilityCheckout
+	IntegrationCapabilityAutoCharge              = types.IntegrationCapabilityAutoCharge
+	IntegrationCapabilitySetDefaultMethod        = types.IntegrationCapabilitySetDefaultMethod
+	IntegrationCapabilityPaymentLink             = types.IntegrationCapabilityPaymentLink
+	IntegrationCapabilityPaymentMethodManagement = types.IntegrationCapabilityPaymentMethodManagement
 )
 
 // Derived from connections rows at read time, not stored alongside
@@ -141,7 +146,6 @@ const (
 // provider through hosted links, so no browser initialises a provider SDK.
 type PaymentIntegration struct {
 	Provider     types.PaymentGatewayType `json:"provider"`
-	IsDefault    bool                     `json:"is_default"`
 	Capabilities []IntegrationCapability  `json:"capabilities"`
 }
 
