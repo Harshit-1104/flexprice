@@ -444,21 +444,22 @@ func (h *CustomerPortalHandler) AddPaymentMethod(c *gin.Context) {
 // @Summary Remove a saved payment method
 // @ID portalDeletePaymentMethod
 // @Tags Customer Portal
+// @Accept json
 // @Produce json
-// @Param id path string true "Payment method ID"
+// @Param request body dto.PortalDeletePaymentMethodRequest true "Payment method to remove"
 // @Success 200 {object} dto.SavedPaymentMethodsResponse
 // @Failure 400 {object} ierr.ErrorResponse
 // @Failure 403 {object} ierr.ErrorResponse
 // @Failure 409 {object} ierr.ErrorResponse
 // @x-scope "delete"
-// @Router /customer/portal/payment-methods/{id} [delete]
+// @Router /customer/portal/payment-methods/delete [post]
 func (h *CustomerPortalHandler) DeletePaymentMethod(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		c.Error(ierr.NewError("payment_method_id is required").Mark(ierr.ErrValidation))
+	var req dto.PortalDeletePaymentMethodRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(ierr.WithError(err).Mark(ierr.ErrValidation))
 		return
 	}
-	resp, err := h.portalService.DeletePaymentMethod(c.Request.Context(), id)
+	resp, err := h.portalService.DeletePaymentMethod(c.Request.Context(), &req)
 	if err != nil {
 		c.Error(err)
 		return
@@ -519,21 +520,22 @@ func (h *CustomerPortalHandler) CancelCheckoutSession(c *gin.Context) {
 // @Summary Make a saved card the one auto-charge uses
 // @ID portalSetDefaultPaymentMethod
 // @Tags Customer Portal
+// @Accept json
 // @Produce json
-// @Param id path string true "Payment method ID"
+// @Param request body dto.PortalSetDefaultPaymentMethodRequest true "Payment method to make default"
 // @Success 200 {object} dto.SavedPaymentMethodsResponse
 // @Failure 400 {object} ierr.ErrorResponse
 // @Failure 403 {object} ierr.ErrorResponse
 // @Failure 404 {object} ierr.ErrorResponse
 // @x-scope "write"
-// @Router /customer/portal/payment-methods/{id}/default [post]
+// @Router /customer/portal/payment-methods/default [post]
 func (h *CustomerPortalHandler) SetDefaultPaymentMethod(c *gin.Context) {
-	id := c.Param("id")
-	if id == "" {
-		c.Error(ierr.NewError("payment_method_id is required").Mark(ierr.ErrValidation))
+	var req dto.PortalSetDefaultPaymentMethodRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(ierr.WithError(err).Mark(ierr.ErrValidation))
 		return
 	}
-	resp, err := h.portalService.SetDefaultPaymentMethod(c.Request.Context(), id)
+	resp, err := h.portalService.SetDefaultPaymentMethod(c.Request.Context(), &req)
 	if err != nil {
 		c.Error(err)
 		return

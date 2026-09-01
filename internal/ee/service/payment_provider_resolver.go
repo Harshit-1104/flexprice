@@ -13,7 +13,7 @@ import (
 type PaymentProviderResolver = interfaces.PaymentProviderResolver
 
 // gatewayCapabilities mirrors three switch statements that must agree with it:
-// Factory.GetCheckoutProvider, Factory.GetSavedMethodProvider, and
+// Factory.GetCheckoutProvider, Factory.GetPaymentMethodProvider, and
 // paymentProcessor.handlePaymentLinkCreation. Stripe's unattended settlement
 // (processPaymentMethodCharge) is absent on purpose — it is not on the
 // CheckoutProvider seam, so nothing resolved here can route to it.

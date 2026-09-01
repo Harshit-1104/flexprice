@@ -233,3 +233,95 @@ func TestToSavedPaymentMethod(t *testing.T) {
 		})
 	}
 }
+
+func (s *PortalPaymentMethodSuite) TestAddPaymentMethodRequiresPortalCustomer() {
+	s.connect(types.SecretProviderChargebee)
+
+	_, err := s.svc.AddPaymentMethod(s.GetContext(), &dto.PortalAddPaymentMethodRequest{
+		PaymentProvider: types.PaymentGatewayTypeChargebee,
+	})
+	s.Error(err)
+	s.True(ierr.IsPermissionDenied(err))
+}
+
+func (s *PortalPaymentMethodSuite) TestAddPaymentMethodRequiresProvider() {
+	s.connect(types.SecretProviderChargebee)
+
+	_, err := s.svc.AddPaymentMethod(s.ctx, &dto.PortalAddPaymentMethodRequest{})
+	s.Error(err)
+	s.True(ierr.IsValidation(err), "an unnamed provider must be refused, not guessed")
+}
+
+// Named but not connected: refused before any gateway call, so the customer is
+// never sent to a link that cannot exist.
+func (s *PortalPaymentMethodSuite) TestAddPaymentMethodRejectsUnconnectedProvider() {
+	s.connect(types.SecretProviderStripe)
+
+	_, err := s.svc.AddPaymentMethod(s.ctx, &dto.PortalAddPaymentMethodRequest{
+		PaymentProvider: types.PaymentGatewayTypeChargebee,
+	})
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+}
+
+func (s *PortalPaymentMethodSuite) TestAddPaymentMethodRejectsIncapableProvider() {
+	s.connect(types.SecretProviderChargebee, types.SecretProviderStripe)
+
+	_, err := s.svc.AddPaymentMethod(s.ctx, &dto.PortalAddPaymentMethodRequest{
+		PaymentProvider: types.PaymentGatewayTypeStripe,
+	})
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+}
+
+func (s *PortalPaymentMethodSuite) TestMutateRequiresPaymentMethodID() {
+	s.connect(types.SecretProviderChargebee)
+	delRef := &dto.PortalDeletePaymentMethodRequest{PaymentProvider: types.PaymentGatewayTypeChargebee}
+	defRef := &dto.PortalSetDefaultPaymentMethodRequest{PaymentProvider: types.PaymentGatewayTypeChargebee}
+
+	_, err := s.svc.DeletePaymentMethod(s.ctx, delRef)
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+
+	_, err = s.svc.SetDefaultPaymentMethod(s.ctx, defRef)
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+}
+
+// A bare method id is only unique within a provider, so the pair is the address —
+// an unnamed provider must never be inferred.
+func (s *PortalPaymentMethodSuite) TestMutateRequiresProvider() {
+	s.connect(types.SecretProviderChargebee)
+	delRef := &dto.PortalDeletePaymentMethodRequest{PaymentMethodID: "pm_x"}
+	defRef := &dto.PortalSetDefaultPaymentMethodRequest{PaymentMethodID: "pm_x"}
+
+	_, err := s.svc.DeletePaymentMethod(s.ctx, delRef)
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+
+	_, err = s.svc.SetDefaultPaymentMethod(s.ctx, defRef)
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+}
+
+func (s *PortalPaymentMethodSuite) TestMutateRequiresPortalCustomer() {
+	s.connect(types.SecretProviderChargebee)
+
+	_, err := s.svc.DeletePaymentMethod(s.GetContext(), &dto.PortalDeletePaymentMethodRequest{
+		PaymentProvider: types.PaymentGatewayTypeChargebee,
+		PaymentMethodID: "pm_x",
+	})
+	s.Error(err)
+	s.True(ierr.IsPermissionDenied(err))
+}
+
+func (s *PortalPaymentMethodSuite) TestMutateRejectsIncapableProvider() {
+	s.connect(types.SecretProviderChargebee, types.SecretProviderStripe)
+
+	_, err := s.svc.SetDefaultPaymentMethod(s.ctx, &dto.PortalSetDefaultPaymentMethodRequest{
+		PaymentProvider: types.PaymentGatewayTypeStripe,
+		PaymentMethodID: "pm_x",
+	})
+	s.Error(err)
+	s.True(ierr.IsValidation(err))
+}

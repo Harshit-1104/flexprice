@@ -59,8 +59,8 @@ type CustomerPortalService interface {
 	// Payment methods
 	ListPaymentMethods(ctx context.Context, req *dto.ListSavedPaymentMethodsRequest) (*dto.SavedPaymentMethodsResponse, error)
 	AddPaymentMethod(ctx context.Context, req *dto.PortalAddPaymentMethodRequest) (*dto.AddPaymentMethodResponse, error)
-	DeletePaymentMethod(ctx context.Context, paymentMethodID string) (*dto.SavedPaymentMethodsResponse, error)
-	SetDefaultPaymentMethod(ctx context.Context, paymentMethodID string) (*dto.SavedPaymentMethodsResponse, error)
+	DeletePaymentMethod(ctx context.Context, req *dto.PortalDeletePaymentMethodRequest) (*dto.SavedPaymentMethodsResponse, error)
+	SetDefaultPaymentMethod(ctx context.Context, req *dto.PortalSetDefaultPaymentMethodRequest) (*dto.SavedPaymentMethodsResponse, error)
 }
 
 type customerPortalService struct {

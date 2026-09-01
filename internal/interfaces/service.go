@@ -287,6 +287,6 @@ type PaymentProviderResolver interface {
 }
 
 type ProviderCapabilities struct {
-	Gateway types.PaymentGatewayType
+	Gateway      types.PaymentGatewayType
 	Capabilities []types.IntegrationCapability
 }

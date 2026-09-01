@@ -63,9 +63,18 @@ type PortalTopUpWalletResponse struct {
 // direct vault is its property, not a client choice, so there is no per-flow
 // endpoint. Read AddPaymentMethodResponse.Action for what to do next.
 type PortalAddPaymentMethodRequest struct {
-	PaymentProvider *types.PaymentGatewayType `json:"payment_provider,omitempty"`
+	PaymentProvider types.PaymentGatewayType `json:"payment_provider" binding:"required"`
 	RedirectionParams
-	SetDefault bool `json:"set_default,omitempty"`
+}
+
+type PortalDeletePaymentMethodRequest struct {
+	PaymentProvider types.PaymentGatewayType `json:"payment_provider" binding:"required"`
+	PaymentMethodID string                   `json:"payment_method_id" binding:"required"`
+}
+
+type PortalSetDefaultPaymentMethodRequest struct {
+	PaymentProvider types.PaymentGatewayType `json:"payment_provider" binding:"required"`
+	PaymentMethodID string                   `json:"payment_method_id" binding:"required"`
 }
 
 // Narrower than the admin UpdateWalletRequest, which also carries Config,

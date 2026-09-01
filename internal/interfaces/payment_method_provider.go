@@ -7,9 +7,9 @@ import (
 	"github.com/flexprice/flexprice/internal/types"
 )
 
-// SavedMethodProvider is implemented by each gateway that can vault a payment
+// PaymentMethodProvider is implemented by each gateway that can vault a payment
 // method and let the customer manage it afterwards.
-type SavedMethodProvider interface {
+type PaymentMethodProvider interface {
 	// ListSavedMethods returns the customer's usable methods at this gateway.
 	ListSavedMethods(ctx context.Context, flexCustomerID string) ([]ProviderPaymentMethod, error)
 

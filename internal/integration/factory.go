@@ -1376,11 +1376,11 @@ func (f *Factory) GetS3Client(ctx context.Context) (*s3.Client, error) {
 	return f.s3Client, nil
 }
 
-// GetSavedMethodProvider returns the SavedMethodProvider adapter for the given
+// GetPaymentMethodProvider returns the PaymentMethodProvider adapter for the given
 // gateway. ErrNotImplemented means the provider cannot manage saved methods at all
 // — the permanent answer for Razorpay, whose tokens need a mandate — and callers
 // must treat it as a capability answer rather than a failure.
-func (f *Factory) GetSavedMethodProvider(ctx context.Context, gateway types.PaymentGatewayType, customerSvc interfaces.CustomerService) (interfaces.SavedMethodProvider, error) {
+func (f *Factory) GetPaymentMethodProvider(ctx context.Context, gateway types.PaymentGatewayType, customerSvc interfaces.CustomerService) (interfaces.PaymentMethodProvider, error) {
 	switch gateway {
 	case types.PaymentGatewayTypeChargebee:
 		i, err := f.GetChargebeeIntegration(ctx)

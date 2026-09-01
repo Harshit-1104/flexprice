@@ -691,8 +691,8 @@ func NewRouter(
 		// Payment methods
 		customerPortalAPI.GET("/payment-methods", handlers.CustomerPortal.ListPaymentMethods)
 		customerPortalAPI.POST("/payment-methods", handlers.CustomerPortal.AddPaymentMethod)
-		customerPortalAPI.DELETE("/payment-methods/:id", handlers.CustomerPortal.DeletePaymentMethod)
-		customerPortalAPI.POST("/payment-methods/:id/default", handlers.CustomerPortal.SetDefaultPaymentMethod)
+		customerPortalAPI.POST("/payment-methods/delete", handlers.CustomerPortal.DeletePaymentMethod)
+		customerPortalAPI.POST("/payment-methods/default", handlers.CustomerPortal.SetDefaultPaymentMethod)
 
 		// Portal config (theme, sections, tabs) — tenant-authored
 		customerPortalAPI.GET("/config", handlers.CustomerPortal.GetPortalConfig)

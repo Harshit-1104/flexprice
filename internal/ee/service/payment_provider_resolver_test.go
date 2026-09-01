@@ -241,9 +241,9 @@ func (s *PaymentProviderResolverSuite) TestGatewayCapabilitiesMatchFactory() {
 
 	for gw := range gatewayCapabilities {
 		wantSaved := lo.Contains(gatewayCapabilities[gw], types.IntegrationCapabilityPaymentMethodManagement)
-		_, err := factory.GetSavedMethodProvider(ctx, gw, nil)
+		_, err := factory.GetPaymentMethodProvider(ctx, gw, nil)
 		s.Equal(wantSaved, !ierr.IsNotImplemented(err),
-			"payment_method_management for %s disagrees with Factory.GetSavedMethodProvider", gw)
+			"payment_method_management for %s disagrees with Factory.GetPaymentMethodProvider", gw)
 
 		wantCheckout := lo.Contains(gatewayCapabilities[gw], types.IntegrationCapabilityCheckout)
 		provider, ok := checkoutProviderFor(gw)
