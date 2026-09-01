@@ -20,6 +20,7 @@ type PaymentProviderResolver = interfaces.PaymentProviderResolver
 var gatewayCapabilities = map[types.PaymentGatewayType][]types.IntegrationCapabilityType{
 	types.PaymentGatewayTypeChargebee: {
 		types.IntegrationCapabilityCheckout,
+		types.IntegrationCapabilityPaymentLink,
 		types.IntegrationCapabilityAutoCharge,
 		types.IntegrationCapabilityPaymentMethodManagement,
 		types.IntegrationCapabilitySetDefaultMethod,

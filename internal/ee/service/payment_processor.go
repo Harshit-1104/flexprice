@@ -13,6 +13,7 @@ import (
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/integration/nomod"
 	"github.com/flexprice/flexprice/internal/integration/razorpay"
+	"github.com/flexprice/flexprice/internal/interfaces"
 	temporalmodels "github.com/flexprice/flexprice/internal/temporal/models"
 	temporalservice "github.com/flexprice/flexprice/internal/temporal/service"
 	"github.com/flexprice/flexprice/internal/types"
@@ -217,6 +218,8 @@ func (p *paymentProcessor) handlePaymentLinkCreation(ctx context.Context, paymen
 		return p.handleRazorpayPaymentLinkCreation(ctx, paymentObj, invoice)
 	case types.PaymentGatewayTypeNomod:
 		return p.handleNomodPaymentLinkCreation(ctx, paymentObj, invoice)
+	case types.PaymentGatewayTypeChargebee:
+		return p.handleChargebeePaymentLinkCreation(ctx, paymentObj, invoice)
 	default:
 		return ierr.NewError("unsupported payment gateway").
 			WithHint("Payment gateway not supported for payment links").
@@ -419,6 +422,84 @@ func (p *paymentProcessor) handleRazorpayPaymentLinkCreation(ctx context.Context
 		"payment_url", paymentLinkResp.PaymentURL)
 
 	return nil
+}
+
+// handleChargebeePaymentLinkCreation routes through the CheckoutProvider seam rather
+// than a bespoke client: CreatePaymentLink there is session-independent and already
+// mirrors the invoice and stamps the payment id Chargebee's webhook reconciles on.
+func (p *paymentProcessor) handleChargebeePaymentLinkCreation(ctx context.Context, paymentObj *payment.Payment, inv *invoice.Invoice) error {
+	provider, err := p.IntegrationFactory.GetCheckoutProvider(
+		ctx,
+		types.CheckoutPaymentProviderChargebee,
+		NewCustomerService(p.ServiceParams),
+		NewInvoiceService(p.ServiceParams),
+	)
+	if err != nil {
+		return err
+	}
+
+	resp, err := provider.CreatePaymentLink(ctx, interfaces.CheckoutProviderRequest{
+		InvoiceID:  paymentObj.DestinationID,
+		CustomerID: inv.CustomerID,
+		Amount:     paymentObj.Amount,
+		Currency:   paymentObj.Currency,
+		PaymentID:  paymentObj.ID,
+		SuccessURL: gatewayURL(paymentObj, "success_url"),
+		FailureURL: gatewayURL(paymentObj, "failure_url"),
+		CancelURL:  gatewayURL(paymentObj, "cancel_url"),
+		Metadata:   linkMetadataFor(paymentObj),
+	})
+	if err != nil {
+		p.Logger.Error(ctx, "failed to create chargebee payment link",
+			"error", err,
+			"payment_id", paymentObj.ID,
+			"invoice_id", paymentObj.DestinationID)
+		return err
+	}
+
+	paymentObj.PaymentStatus = types.PaymentStatusPending
+	if resp.ProviderSessionID != "" {
+		paymentObj.GatewayTrackingID = &resp.ProviderSessionID
+	}
+	if paymentObj.GatewayMetadata == nil {
+		paymentObj.GatewayMetadata = types.Metadata{}
+	}
+	paymentObj.GatewayMetadata["payment_url"] = resp.NextAction.URL
+	paymentObj.GatewayMetadata["gateway"] = string(types.PaymentGatewayTypeChargebee)
+
+	if err := p.PaymentRepo.Update(ctx, paymentObj); err != nil {
+		return ierr.WithError(err).
+			WithHint("Failed to update payment with payment link information").
+			WithReportableDetails(map[string]interface{}{"payment_id": paymentObj.ID}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	p.Logger.Info(ctx, "created chargebee payment link",
+		"payment_id", paymentObj.ID,
+		"invoice_id", paymentObj.DestinationID)
+	return nil
+}
+
+func gatewayURL(paymentObj *payment.Payment, key string) string {
+	if paymentObj.Metadata == nil {
+		return ""
+	}
+	return paymentObj.Metadata[key]
+}
+
+// linkMetadataFor drops the connection fields, which are internal, and stamps the
+// FlexPrice payment id the gateway webhooks key off.
+func linkMetadataFor(paymentObj *payment.Payment) map[string]string {
+	out := make(map[string]string, len(paymentObj.Metadata)+1)
+	for k, v := range paymentObj.Metadata {
+		if k == "connection_id" || k == "connection_name" {
+			continue
+		}
+		out[k] = v
+	}
+
+	out["flexprice_payment_id"] = paymentObj.ID
+	return out
 }
 
 func (p *paymentProcessor) handleNomodPaymentLinkCreation(ctx context.Context, paymentObj *payment.Payment, invoice *invoice.Invoice) error {

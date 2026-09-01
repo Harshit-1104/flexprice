@@ -44,7 +44,8 @@ func (s *customerPortalService) AddPaymentMethod(ctx context.Context, req *dto.P
 		return nil, err
 	}
 
-	provider, gw, err := s.methodProviderFor(ctx, customerID, req.PaymentProvider)
+	provider, gw, err := s.methodProviderFor(ctx, customerID,
+		types.IntegrationCapabilityPaymentMethodManagement, req.PaymentProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -76,8 +77,9 @@ func (s *customerPortalService) DeletePaymentMethod(ctx context.Context, req *dt
 	if req == nil {
 		return nil, ierr.NewError("request is required").Mark(ierr.ErrValidation)
 	}
-	
-	return s.mutateSavedMethod(ctx, req.PaymentProvider, req.PaymentMethodID,
+
+	return s.mutateSavedMethod(ctx, types.IntegrationCapabilityPaymentMethodManagement,
+		req.PaymentProvider, req.PaymentMethodID,
 		func(ctx context.Context, provider interfaces.PaymentMethodProvider, customerID, methodID string) error {
 			return provider.DeleteSavedMethod(ctx, customerID, methodID)
 		})
@@ -88,7 +90,11 @@ func (s *customerPortalService) SetDefaultPaymentMethod(ctx context.Context, req
 		return nil, ierr.NewError("request is required").Mark(ierr.ErrValidation)
 	}
 
-	return s.mutateSavedMethod(ctx, req.PaymentProvider, req.PaymentMethodID,
+	// set_default_method, not payment_method_management: a provider can list and
+	// delete vaulted methods with no notion of a default (a Razorpay mandate has no
+	// primary flag), and must not be offered here.
+	return s.mutateSavedMethod(ctx, types.IntegrationCapabilitySetDefaultMethod,
+		req.PaymentProvider, req.PaymentMethodID,
 		func(ctx context.Context, provider interfaces.PaymentMethodProvider, customerID, methodID string) error {
 			return provider.SetDefaultSavedMethod(ctx, customerID, methodID)
 		})
@@ -100,6 +106,7 @@ func (s *customerPortalService) SetDefaultPaymentMethod(ctx context.Context, req
 // never as an error implying the write did not happen.
 func (s *customerPortalService) mutateSavedMethod(
 	ctx context.Context,
+	capability types.IntegrationCapabilityType,
 	gateway types.PaymentGatewayType,
 	paymentMethodID string,
 	write func(ctx context.Context, provider interfaces.PaymentMethodProvider, customerID, methodID string) error,
@@ -115,7 +122,7 @@ func (s *customerPortalService) mutateSavedMethod(
 		return nil, err
 	}
 
-	provider, resolvedGateway, err := s.methodProviderFor(ctx, customerID, gateway)
+	provider, resolvedGateway, err := s.methodProviderFor(ctx, customerID, capability, gateway)
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +142,7 @@ func (s *customerPortalService) mutateSavedMethod(
 func (s *customerPortalService) methodProviderFor(
 	ctx context.Context,
 	customerID string,
+	capability types.IntegrationCapabilityType,
 	gateway types.PaymentGatewayType,
 ) (interfaces.PaymentMethodProvider, types.PaymentGatewayType, error) {
 	if gateway == "" {
@@ -144,7 +152,7 @@ func (s *customerPortalService) methodProviderFor(
 	}
 
 	resolvedGateway, err := NewPaymentProviderResolver(s.ServiceParams).
-		ResolveProvider(ctx, customerID, types.IntegrationCapabilityPaymentMethodManagement, gateway)
+		ResolveProvider(ctx, customerID, capability, gateway)
 	if err != nil {
 		return nil, "", err
 	}

@@ -70,9 +70,9 @@ func (s *PaymentProviderResolverSuite) TestIntersectionNarrowsPerCapability() {
 	s.NoError(err)
 	s.Equal(types.PaymentGatewayTypeChargebee, gw)
 
-	gw, err = s.svc.ResolveProvider(ctx, "cust_1", types.IntegrationCapabilityPaymentLink, "")
-	s.NoError(err)
-	s.Equal(types.PaymentGatewayTypeStripe, gw)
+	// Both do payment links, so that capability is contested and must be chosen.
+	_, err = s.svc.ResolveProvider(ctx, "cust_1", types.IntegrationCapabilityPaymentLink, "")
+	s.True(ierr.IsValidation(err))
 
 	gw, err = s.svc.ResolveProvider(ctx, "cust_1", types.IntegrationCapabilityPaymentMethodManagement, "")
 	s.NoError(err)
@@ -131,6 +131,7 @@ func (s *PaymentProviderResolverSuite) TestListProvidersSkipsUnusableAndNonPayme
 	s.Equal(types.PaymentGatewayTypeChargebee, got[0].Gateway)
 	s.ElementsMatch([]types.IntegrationCapability{
 		{Type: types.IntegrationCapabilityCheckout, IsDefault: true},
+		{Type: types.IntegrationCapabilityPaymentLink, IsDefault: true},
 		{Type: types.IntegrationCapabilityAutoCharge, IsDefault: true},
 		{Type: types.IntegrationCapabilityPaymentMethodManagement, IsDefault: true},
 		{Type: types.IntegrationCapabilitySetDefaultMethod, IsDefault: true},
@@ -158,15 +159,14 @@ func (s *PaymentProviderResolverSuite) TestDefaultIsPerCapability() {
 	s.NoError(err)
 	s.Require().Len(got, 2)
 
+	// payment_link is contested between the two, so neither is its default.
 	s.ElementsMatch([]types.IntegrationCapabilityType{
 		types.IntegrationCapabilityCheckout,
 		types.IntegrationCapabilityAutoCharge,
 		types.IntegrationCapabilityPaymentMethodManagement,
 		types.IntegrationCapabilitySetDefaultMethod,
 	}, defaultTypes(got, types.PaymentGatewayTypeChargebee))
-	s.ElementsMatch([]types.IntegrationCapabilityType{
-		types.IntegrationCapabilityPaymentLink,
-	}, defaultTypes(got, types.PaymentGatewayTypeStripe))
+	s.Empty(defaultTypes(got, types.PaymentGatewayTypeStripe))
 }
 
 // A contested capability has no default on any provider; ResolveProvider must
