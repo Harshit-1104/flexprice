@@ -463,13 +463,8 @@ func buildCheckoutDraftInvoice(
 }
 
 func (s *checkoutSessionService) createCheckoutPayment(ctx context.Context, inv *invoice.Invoice, provider types.CheckoutPaymentProvider) (*dto.PaymentResponse, error) {
-	var gateway types.PaymentGatewayType
-	switch provider {
-	case types.CheckoutPaymentProviderRazorpay:
-		gateway = types.PaymentGatewayTypeRazorpay
-	case types.CheckoutPaymentProviderChargebee:
-		gateway = types.PaymentGatewayTypeChargebee
-	default:
+	gateway, ok := provider.ToPaymentGateway()
+	if !ok {
 		return nil, ierr.NewError("unsupported payment provider for checkout").
 			WithHint("No gateway mapping exists for this provider").
 			WithReportableDetails(map[string]any{"provider": provider}).

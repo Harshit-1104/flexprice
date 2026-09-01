@@ -76,6 +76,7 @@ func (s *customerPortalService) DeletePaymentMethod(ctx context.Context, req *dt
 	if req == nil {
 		return nil, ierr.NewError("request is required").Mark(ierr.ErrValidation)
 	}
+	
 	return s.mutateSavedMethod(ctx, req.PaymentProvider, req.PaymentMethodID,
 		func(ctx context.Context, provider interfaces.PaymentMethodProvider, customerID, methodID string) error {
 			return provider.DeleteSavedMethod(ctx, customerID, methodID)
@@ -86,6 +87,7 @@ func (s *customerPortalService) SetDefaultPaymentMethod(ctx context.Context, req
 	if req == nil {
 		return nil, ierr.NewError("request is required").Mark(ierr.ErrValidation)
 	}
+
 	return s.mutateSavedMethod(ctx, req.PaymentProvider, req.PaymentMethodID,
 		func(ctx context.Context, provider interfaces.PaymentMethodProvider, customerID, methodID string) error {
 			return provider.SetDefaultSavedMethod(ctx, customerID, methodID)

@@ -8,6 +8,7 @@ import (
 	"github.com/flexprice/flexprice/internal/domain/wallet"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
 )
 
@@ -44,10 +45,21 @@ func (s *customerPortalService) TopUpWallet(ctx context.Context, walletID string
 	}
 
 	if req.Checkout != nil {
-		if req.Checkout.PaymentProvider == nil {
-			return nil, ierr.NewError("payment_provider is required").
-				WithHint("Specify the payment provider to check out with").
-				Mark(ierr.ErrValidation)
+		provider, err := s.resolveCheckoutProvider(ctx, w.CustomerID, req.Checkout.PaymentProvider)
+		if err != nil {
+			return nil, err
+		}
+
+		// An abandoned session would otherwise lock the wallet until it expires, so
+		// hand back the one already in flight rather than a conflict the customer
+		// cannot act on.
+		if existing, err := s.pendingTopupSession(ctx, w.CustomerID, walletID); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return &dto.PortalTopUpWalletResponse{
+				Wallet:          dto.FromWallet(w),
+				CheckoutSession: existing,
+			}, nil
 		}
 
 		collectionMethod := types.CollectionMethodSendInvoice
@@ -62,10 +74,10 @@ func (s *customerPortalService) TopUpWallet(ctx context.Context, walletID string
 
 		walletReq.Checkout = &dto.CheckoutParams{
 			PaymentParams: dto.PaymentParams{
-				PaymentProvider: *req.Checkout.PaymentProvider,
+				PaymentProvider: provider,
 				PaymentProviderConfig: &types.CheckoutPaymentProviderConfig{
 					CollectionMethod: collectionMethod,
-					CustomerPresent: true,
+					CustomerPresent:  true,
 				},
 			},
 			RedirectionParams: req.Checkout.RedirectionParams,
@@ -102,9 +114,125 @@ func (s *customerPortalService) TopUpWallet(ctx context.Context, walletID string
 }
 
 func (s *customerPortalService) UpdateAutoTopup(ctx context.Context, walletID string, req *dto.PortalUpdateAutoTopupRequest) (*dto.WalletResponse, error) {
-	return nil, ierr.NewError("auto top-up is not available yet").
-		WithHint("This endpoint is not implemented yet").
-		Mark(ierr.ErrNotImplemented)
+	if req == nil {
+		return nil, ierr.NewError("request is required").Mark(ierr.ErrValidation)
+	}
+
+	w, err := s.authorizeWallet(ctx, walletID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Invoicing is pinned, never taken from the request: it selects the transaction
+	// reason and so decides whether credits are paid for at all.
+	autoTopup := &types.AutoTopup{
+		Enabled:   lo.ToPtr(req.Enabled),
+		Threshold: req.Threshold,
+		Amount:    req.Amount,
+		Invoicing: lo.ToPtr(true),
+		Cooldown:  req.Cooldown,
+	}
+
+	if req.Enabled {
+		if req.Amount == nil || req.Threshold == nil {
+			return nil, ierr.NewError("threshold and amount are required to enable auto top-up").
+				WithHint("Specify both the balance threshold and the amount to add").
+				Mark(ierr.ErrValidation)
+		}
+		if err := s.validateTopupAmount(ctx, w, *req.Amount); err != nil {
+			return nil, err
+		}
+		if err := s.requireAutoChargeableMethod(ctx, w.CustomerID); err != nil {
+			return nil, err
+		}
+	}
+
+	updated, err := NewWalletService(s.ServiceParams).UpdateWallet(ctx, walletID, &dto.UpdateWalletRequest{
+		AutoTopup: autoTopup,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dto.FromWallet(updated), nil
+}
+
+// requireAutoChargeableMethod refuses to store a preference that could never be
+// honoured. Vaulting depends on a per-tenant provider setting, so "no saved card"
+// is an ordinary state rather than an edge case.
+func (s *customerPortalService) requireAutoChargeableMethod(ctx context.Context, customerID string) error {
+	gateways, err := s.methodManagementProviders(ctx, customerID, nil)
+	if err != nil {
+		return err
+	}
+
+	for _, gw := range gateways {
+		if !lo.Contains(gatewayCapabilities[gw], types.IntegrationCapabilityAutoCharge) {
+			continue
+		}
+		group := s.readSavedMethods(ctx, customerID, gw)
+		if group.Error != nil {
+			return ierr.NewError("could not verify a saved payment method").
+				WithHint("The payment provider could not be reached; try again shortly").
+				Mark(ierr.ErrHTTPClient)
+		}
+		if lo.ContainsBy(group.Items, func(m *dto.SavedPaymentMethod) bool { return m.CanAutoCharge }) {
+			return nil
+		}
+	}
+
+	return ierr.NewError("no payment method can be charged automatically").
+		WithHint("Add a payment method that supports automatic charges before enabling auto top-up").
+		Mark(ierr.ErrInvalidOperation)
+}
+
+// resolveCheckoutProvider turns an optional caller choice into the one gateway that
+// can host this checkout, then back into the checkout vocabulary.
+func (s *customerPortalService) resolveCheckoutProvider(
+	ctx context.Context,
+	customerID string,
+	requested *types.CheckoutPaymentProvider,
+) (types.CheckoutPaymentProvider, error) {
+	var requestedGateway types.PaymentGatewayType
+	if requested != nil && *requested != "" {
+		gw, ok := requested.ToPaymentGateway()
+		if !ok {
+			return "", ierr.NewError("unsupported payment provider for checkout").
+				WithHintf("%s cannot host a checkout", *requested).
+				Mark(ierr.ErrValidation)
+		}
+		requestedGateway = gw
+	}
+
+	resolved, err := NewPaymentProviderResolver(s.ServiceParams).
+		ResolveProvider(ctx, customerID, types.IntegrationCapabilityCheckout, requestedGateway)
+	if err != nil {
+		return "", err
+	}
+
+	provider, ok := types.CheckoutProviderFromGateway(resolved)
+	if !ok {
+		return "", ierr.NewError("resolved provider cannot host a checkout").
+			WithReportableDetails(map[string]any{"gateway": resolved}).
+			Mark(ierr.ErrInternal)
+	}
+	return provider, nil
+}
+
+func (s *customerPortalService) pendingTopupSession(
+	ctx context.Context,
+	customerID string,
+	walletID string,
+) (*dto.PortalCheckoutSessionResponse, error) {
+	walletSvc := NewWalletService(s.ServiceParams).(*walletService)
+	existing, err := walletSvc.getAnyPendingCheckoutSession(ctx, customerID, walletID)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 {
+		return nil, nil
+	}
+	
+	return toPortalCheckoutSession(dto.ToCheckoutSessionResponse(existing[0])), nil
 }
 
 // validateTopupAmount rejects a credit amount that converts to less than the

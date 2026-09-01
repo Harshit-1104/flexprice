@@ -88,6 +88,31 @@ func (p CheckoutPaymentProvider) Validate() error {
 	return nil
 }
 
+// ToPaymentGateway maps a checkout provider onto the gateway that settles it.
+func (p CheckoutPaymentProvider) ToPaymentGateway() (PaymentGatewayType, bool) {
+	switch p {
+	case CheckoutPaymentProviderRazorpay:
+		return PaymentGatewayTypeRazorpay, true
+	case CheckoutPaymentProviderChargebee:
+		return PaymentGatewayTypeChargebee, true
+	default:
+		return "", false
+	}
+}
+
+// CheckoutProviderFromGateway is the reverse. ok=false means the gateway has no
+// hosted-checkout adapter, so it cannot back a checkout session.
+func CheckoutProviderFromGateway(g PaymentGatewayType) (CheckoutPaymentProvider, bool) {
+	switch g {
+	case PaymentGatewayTypeRazorpay:
+		return CheckoutPaymentProviderRazorpay, true
+	case PaymentGatewayTypeChargebee:
+		return CheckoutPaymentProviderChargebee, true
+	default:
+		return "", false
+	}
+}
+
 // SessionExpiry returns the default lifetime for a checkout session with this provider.
 func (p CheckoutPaymentProvider) SessionExpiry() time.Duration {
 	switch p {
