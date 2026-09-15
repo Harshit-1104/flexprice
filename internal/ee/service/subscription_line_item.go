@@ -195,7 +195,8 @@ func (s *subscriptionService) addSubscriptionLineItem(ctx context.Context, subsc
 					},
 				},
 			}
-			if _, applyErr := NewLineItemProrationService(s.ServiceParams).Apply(ctx, prorationReq); applyErr != nil {
+			if applyErr := s.settleLineItemProration(ctx, prorationReq,
+				prorationChargeInvoiceKey(prorationReq)); applyErr != nil {
 				s.Logger.Info(ctx, "proration apply failed for line item add",
 					"line_item_id", lineItem.ID, "error", applyErr)
 			}
@@ -490,7 +491,8 @@ func (s *subscriptionService) deleteSubscriptionLineItem(ctx context.Context, li
 							},
 						},
 					}
-					if _, applyErr := NewLineItemProrationService(s.ServiceParams).Apply(ctx, prorationReq); applyErr != nil {
+					if applyErr := s.settleLineItemProration(ctx, prorationReq,
+						prorationReq.IdempotencyKey); applyErr != nil {
 						s.Logger.Info(ctx, "proration apply failed for line item delete",
 							"line_item_id", lineItemID, "error", applyErr)
 					}
@@ -1419,4 +1421,34 @@ func (s *subscriptionService) resolveLineItemPrice(ctx context.Context, priceID 
 		return nil, err
 	}
 	return p, nil
+}
+
+// settleLineItemProration prices a single line-item change and settles it as one document.
+// The key differs per caller: an addition invoices and a removal credits the wallet, and the
+// two dedupe on different formats today.
+func (s *subscriptionService) settleLineItemProration(
+	ctx context.Context,
+	req LineItemProrationRequest,
+	idempotencyKey string,
+) error {
+	if req.Behavior != types.ProrationBehaviorCreateProrations {
+		return nil
+	}
+
+	prorationSvc := NewLineItemProrationService(s.ServiceParams)
+
+	quote, err := prorationSvc.Compute(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	settleReq := NewSettleProrationRequest(
+		req.Subscription, quote, req.EffectiveDate, req.Subscription.CurrentPeriodEnd,
+		"Subscription update", idempotencyKey, SettleModeIssue,
+	)
+	settleReq.Reason = req.Reason
+	settleReq.AttemptPayment = true
+
+	_, err = prorationSvc.Settle(ctx, settleReq)
+	return err
 }

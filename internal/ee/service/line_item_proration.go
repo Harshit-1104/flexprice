@@ -12,6 +12,8 @@ import (
 	"github.com/flexprice/flexprice/internal/domain/price"
 	"github.com/flexprice/flexprice/internal/domain/proration"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
+	"github.com/flexprice/flexprice/internal/domain/wallet"
+	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/idempotency"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/shopspring/decimal"
@@ -35,15 +37,12 @@ type LineItemProrationRequest struct {
 }
 
 type LineItemProrationSummary struct {
-	Results []proration.ProrationResult
-
 	ChargeLineItems   []dto.CreateInvoiceLineItemRequest
 	TotalChargeAmount decimal.Decimal
 
 	// Negative amounts. Netting callers put these on the charge invoice; Apply
 	// ignores them and pays TotalCreditAmount to the wallet instead.
-	CreditLineItems []dto.CreateInvoiceLineItemRequest
-
+	CreditLineItems   []dto.CreateInvoiceLineItemRequest
 	TotalCreditAmount decimal.Decimal
 
 	Currency  string
@@ -64,6 +63,23 @@ func emptyProrationSummary(sub *subscription.Subscription) *LineItemProrationSum
 	return summary
 }
 
+// Merge folds other summaries into s. Per-entry effective dates force one Compute per
+// distinct date, and the batch settles as one document.
+func (s *LineItemProrationSummary) Merge(others ...*LineItemProrationSummary) *LineItemProrationSummary {
+	for _, other := range others {
+		if other == nil {
+			continue
+		}
+
+		s.ChargeLineItems = append(s.ChargeLineItems, other.ChargeLineItems...)
+		s.CreditLineItems = append(s.CreditLineItems, other.CreditLineItems...)
+		s.TotalChargeAmount = s.TotalChargeAmount.Add(other.TotalChargeAmount)
+		s.TotalCreditAmount = s.TotalCreditAmount.Add(other.TotalCreditAmount)
+	}
+
+	return s
+}
+
 func (s *LineItemProrationSummary) NetAmount() decimal.Decimal {
 	if s == nil {
 		return decimal.Zero
@@ -71,11 +87,71 @@ func (s *LineItemProrationSummary) NetAmount() decimal.Decimal {
 	return s.TotalChargeAmount.Sub(s.TotalCreditAmount)
 }
 
+type SettleMode int
+
+const (
+	SettleModePreview SettleMode = iota // quotes, writes nothing
+	SettleModeIssue                     // real invoice / real wallet top-up
+	SettleModeDraft                     // pay-first: a DRAFT invoice to collect against
+)
+
+type SettleProrationRequest struct {
+	Subscription *subscription.Subscription
+	Quote        *LineItemProrationSummary
+
+	// Invoice-level service window. Must span every line on the document: a batch has no
+	// single effective date to derive it from, and coupon applicability reads it.
+	PeriodStart time.Time
+	PeriodEnd   time.Time
+
+	// DisplayName titles the document and is required. BillingPeriod defaults to the
+	// subscription's own period.
+	DisplayName   string
+	BillingPeriod types.BillingPeriod
+
+	IdempotencyKey string
+	Reason         string
+	Mode           SettleMode
+
+	// AttemptPayment collects the invoice in-line. Callers that settle inside a transaction
+	// leave it false and attempt after commit.
+	AttemptPayment bool
+}
+
+// NewSettleProrationRequest builds a settlement over an already-computed quote. Reason and
+// BillingPeriod are optional; BillingPeriod falls back to the subscription's own.
+func NewSettleProrationRequest(
+	sub *subscription.Subscription,
+	quote *LineItemProrationSummary,
+	periodStart time.Time,
+	periodEnd time.Time,
+	displayName string,
+	idempotencyKey string,
+	mode SettleMode,
+) *SettleProrationRequest {
+	return &SettleProrationRequest{
+		Subscription:   sub,
+		Quote:          quote,
+		PeriodStart:    periodStart,
+		PeriodEnd:      periodEnd,
+		DisplayName:    displayName,
+		IdempotencyKey: idempotencyKey,
+		Mode:           mode,
+	}
+}
+
+type SettleProrationResult struct {
+	Changed []dto.ChangedInvoice
+	Draft   *dto.InvoiceResponse // set only for SettleModeDraft
+}
+
 type LineItemProrationService interface {
 	Compute(ctx context.Context, req LineItemProrationRequest) (*LineItemProrationSummary, error)
-	// Apply settles Compute: charge invoice if net > 0, wallet credit if net < 0.
-	// No-op when Behavior != CreateProrations.
-	Apply(ctx context.Context, req LineItemProrationRequest) ([]dto.ChangedInvoice, error)
+
+	// Settle raises the quote's net as ONE document: a netted invoice when net > 0, a wallet
+	// credit when net < 0, nothing at zero. The mode keeps preview, pay-later and pay-first
+	// from drifting.
+	Settle(ctx context.Context, req *SettleProrationRequest) (*SettleProrationResult, error)
 }
 
 type lineItemProrationService struct {
@@ -153,8 +229,6 @@ func (s *lineItemProrationService) Compute(ctx context.Context, req LineItemPror
 				continue
 			}
 
-			summary.Results = append(summary.Results, *result)
-
 			if result.NetAmount.GreaterThan(decimal.Zero) {
 				lineItem := s.buildChargeLineItem(sub, entry, result.NetAmount, params.ProrationDate, w.End, p)
 				summary.ChargeLineItems = append(summary.ChargeLineItems, lineItem)
@@ -172,48 +246,146 @@ func (s *lineItemProrationService) Compute(ctx context.Context, req LineItemPror
 	return summary, nil
 }
 
-func (s *lineItemProrationService) Apply(ctx context.Context, req LineItemProrationRequest) ([]dto.ChangedInvoice, error) {
-	if req.Behavior != types.ProrationBehaviorCreateProrations {
-		return nil, nil
+func (s *lineItemProrationService) Settle(ctx context.Context, req *SettleProrationRequest) (*SettleProrationResult, error) {
+	if req == nil {
+		return nil, ierr.NewError("settlement request is required").Mark(ierr.ErrValidation)
+	}
+	if req.DisplayName == "" {
+		return nil, ierr.NewError("settlement display name is required").
+			WithHint("Every proration document must be titled by its caller").
+			Mark(ierr.ErrValidation)
 	}
 
-	summary, err := s.Compute(ctx, req)
-	if err != nil {
-		return nil, err
-	}
+	result := &SettleProrationResult{Changed: make([]dto.ChangedInvoice, 0, 1)}
+	net := req.Quote.NetAmount()
 
-	sub := req.Subscription
-	settled := make([]dto.ChangedInvoice, 0, 2)
+	switch {
+	case net.IsPositive():
+		invoiceReq := buildNettedProrationInvoiceRequest(req)
 
-	if summary.TotalChargeAmount.GreaterThan(decimal.Zero) && len(summary.ChargeLineItems) > 0 {
-		invoiceSvc := NewInvoiceService(s.params)
-		inv, err := s.settleCharge(ctx, sub, summary, req.EffectiveDate, prorationChargeInvoiceKey(req), invoiceSvc)
+		switch req.Mode {
+		case SettleModePreview:
+			inv, err := NewInvoiceService(s.params).CreatePreviewInvoice(ctx, invoiceReq)
+			if err != nil {
+				return nil, err
+			}
+			result.Changed = append(result.Changed, dto.ChangedInvoice{
+				Action:  dto.ChangedInvoiceActionCreated,
+				Status:  dto.ChangedInvoiceStatusPreview,
+				Invoice: inv,
+			})
+
+		case SettleModeDraft:
+			invoiceReq.SourceType = types.InvoiceSourceTypeCheckout
+			inv, skipped, err := NewInvoiceService(s.params).CreateComputedDraftInvoice(ctx, invoiceReq)
+			if err != nil {
+				return nil, err
+			}
+			if skipped {
+				return nil, ierr.NewError("draft invoice was skipped").
+					WithHint("Expected a non-zero invoice amount").
+					WithReportableDetails(map[string]any{"invoice_id": inv.GetId()}).
+					Mark(ierr.ErrValidation)
+			}
+			result.Draft = inv
+
+		default:
+			inv, err := s.issueInvoice(ctx, invoiceReq, req.AttemptPayment)
+			if err != nil {
+				return nil, err
+			}
+			result.Changed = append(result.Changed, dto.ChangedInvoice{
+				ID:      inv.ID,
+				Action:  dto.ChangedInvoiceActionCreated,
+				Status:  dto.ChangedInvoiceStatusFromPaymentStatus(inv.PaymentStatus),
+				Invoice: inv,
+			})
+		}
+
+	case net.IsNegative():
+		if req.Mode == SettleModeDraft {
+			return nil, ierr.NewError("no proration charge to collect via checkout").
+				WithHint("Expected a positive proration charge").
+				Mark(ierr.ErrValidation)
+		}
+
+		credit, err := s.creditWallet(ctx, req, net.Abs())
 		if err != nil {
 			return nil, err
 		}
+		result.Changed = append(result.Changed, credit)
 
-		settled = append(settled, dto.ChangedInvoice{
-			ID:      inv.ID,
-			Action:  dto.ChangedInvoiceActionCreated,
-			Status:  dto.ChangedInvoiceStatusFromPaymentStatus(inv.PaymentStatus),
-			Invoice: inv,
-		})
+	case req.Mode == SettleModeDraft:
+		return nil, ierr.NewError("no proration charge to collect via checkout").
+			WithHint("Expected a positive proration charge").
+			Mark(ierr.ErrValidation)
 	}
 
-	if summary.TotalCreditAmount.GreaterThan(decimal.Zero) {
-		walletSvc := NewWalletService(s.params)
-		billingCustomer := sub.GetInvoicingCustomerID()
-		walletTx, err := walletSvc.TopUpWalletForProratedCharge(
-			ctx, billingCustomer, summary.TotalCreditAmount, sub.Currency, req.IdempotencyKey,
-		)
-		if err != nil {
-			s.params.Logger.Error(ctx, "failed to issue wallet credit for proration", "error", err)
-			return settled, err
-		}
-		settled = append(settled, walletCreditChangedInvoice(walletTx, dto.ChangedInvoiceStatusWalletIssued))
+	return result, nil
+}
+
+func (s *lineItemProrationService) creditWallet(
+	ctx context.Context,
+	req *SettleProrationRequest,
+	amount decimal.Decimal,
+) (dto.ChangedInvoice, error) {
+	sub := req.Subscription
+
+	if req.Mode == SettleModePreview {
+		return walletCreditChangedInvoice(&dto.WalletTransactionResponse{
+			Transaction: &wallet.Transaction{
+				CustomerID:        sub.GetInvoicingCustomerID(),
+				Amount:            amount,
+				Currency:          sub.Currency,
+				TransactionReason: types.TransactionReasonSubscriptionCredit,
+			},
+		}, dto.ChangedInvoiceStatusPreview), nil
 	}
 
-	return settled, nil
+	walletTx, err := NewWalletService(s.params).TopUpWalletForProratedCharge(
+		ctx, sub.GetInvoicingCustomerID(), amount, sub.Currency, req.IdempotencyKey,
+	)
+	if err != nil {
+		s.params.Logger.Error(ctx, "failed to issue wallet credit for proration", "error", err)
+		return dto.ChangedInvoice{}, err
+	}
+
+	return walletCreditChangedInvoice(walletTx, dto.ChangedInvoiceStatusWalletIssued), nil
+}
+
+// buildNettedProrationInvoiceRequest puts charge lines AND credit lines on one document.
+// Credit lines already carry negative amounts, so they subtract naturally.
+func buildNettedProrationInvoiceRequest(req *SettleProrationRequest) dto.CreateInvoiceRequest {
+	sub, quote := req.Subscription, req.Quote
+
+	lineItems := make([]dto.CreateInvoiceLineItemRequest, 0,
+		len(quote.ChargeLineItems)+len(quote.CreditLineItems))
+	lineItems = append(lineItems, quote.ChargeLineItems...)
+	lineItems = append(lineItems, quote.CreditLineItems...)
+
+	billingPeriod := string(req.BillingPeriod)
+	if billingPeriod == "" {
+		billingPeriod = string(sub.BillingPeriod)
+	}
+	net := quote.NetAmount()
+	periodStart, periodEnd := req.PeriodStart, req.PeriodEnd
+
+	return dto.CreateInvoiceRequest{
+		CustomerID:     sub.GetInvoicingCustomerID(),
+		SubscriptionID: &sub.ID,
+		InvoiceType:    types.InvoiceTypeOneOff,
+		Currency:       sub.Currency,
+		BillingReason:  types.InvoiceBillingReasonSubscriptionUpdate,
+		AmountDue:      net,
+		Total:          net,
+		Subtotal:       net,
+		PeriodStart:    &periodStart,
+		PeriodEnd:      &periodEnd,
+		BillingPeriod:  &billingPeriod,
+		LineItems:      lineItems,
+		IdempotencyKey: &req.IdempotencyKey,
+		Metadata:       types.WithCollapsedInvoiceDisplayName(nil, req.DisplayName),
+	}
 }
 
 // Cap removal credits at amounts actually billed (list price never binds).
@@ -374,46 +546,20 @@ func prorationChargeInvoiceKey(req LineItemProrationRequest) string {
 	})
 }
 
-func buildLineItemProrationChargeInvoiceRequest(
-	sub *subscription.Subscription,
-	summary *LineItemProrationSummary,
-	effectiveDate time.Time,
-	idempotencyKey string,
-) dto.CreateInvoiceRequest {
-	billingCustomer := sub.GetInvoicingCustomerID()
-	billingPeriod := string(sub.BillingPeriod)
-	periodEnd := sub.CurrentPeriodEnd
-
-	return dto.CreateInvoiceRequest{
-		CustomerID:     billingCustomer,
-		SubscriptionID: &sub.ID,
-		InvoiceType:    types.InvoiceTypeOneOff,
-		Currency:       sub.Currency,
-		BillingReason:  types.InvoiceBillingReasonSubscriptionUpdate,
-		AmountDue:      summary.TotalChargeAmount,
-		Total:          summary.TotalChargeAmount,
-		Subtotal:       summary.TotalChargeAmount,
-		PeriodStart:    &effectiveDate,
-		PeriodEnd:      &periodEnd,
-		BillingPeriod:  &billingPeriod,
-		LineItems:      summary.ChargeLineItems,
-		IdempotencyKey: &idempotencyKey,
-		Metadata:       types.WithCollapsedInvoiceDisplayName(nil, "Subscription update"),
-	}
-}
-
-func (s *lineItemProrationService) settleCharge(
+func (s *lineItemProrationService) issueInvoice(
 	ctx context.Context,
-	sub *subscription.Subscription,
-	summary *LineItemProrationSummary,
-	effectiveDate time.Time,
-	idempotencyKey string,
-	invoiceSvc InvoiceService,
+	req dto.CreateInvoiceRequest,
+	attemptPayment bool,
 ) (*dto.InvoiceResponse, error) {
-	inv, err := invoiceSvc.CreateInvoice(ctx, buildLineItemProrationChargeInvoiceRequest(sub, summary, effectiveDate, idempotencyKey))
+	invoiceSvc := NewInvoiceService(s.params)
+
+	inv, err := invoiceSvc.CreateInvoice(ctx, req)
 	if err != nil {
 		s.params.Logger.Error(ctx, "failed to create proration charge invoice", "error", err)
 		return nil, err
+	}
+	if !attemptPayment {
+		return inv, nil
 	}
 
 	if err := invoiceSvc.AttemptPayment(ctx, inv.ID); err != nil {

@@ -8,7 +8,6 @@ import (
 	"github.com/flexprice/flexprice/internal/domain/addonassociation"
 	domainCheckout "github.com/flexprice/flexprice/internal/domain/checkout"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
-	"github.com/flexprice/flexprice/internal/domain/wallet"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/samber/lo"
@@ -101,14 +100,18 @@ func (s *subscriptionService) previewAttachAddon(
 		return nil, err
 	}
 
-	summary, err := s.calculateAddonProration(ctx, params)
+	prorationReq, err := s.addonAttachProrationRequest(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
-	changedInvoices, err := s.previewAddonSettlement(ctx, sub, summary, params.getEffectiveDate())
-	if err != nil {
-		return nil, err
+	changedInvoices := []dto.ChangedInvoice{}
+	if prorationReq != nil {
+		quoted, err := s.settleAddonProration(ctx, *prorationReq, "", SettleModePreview)
+		if err != nil {
+			return nil, err
+		}
+		changedInvoices = quoted.Changed
 	}
 
 	return &dto.AddonChangeResult{
@@ -130,7 +133,7 @@ func (s *subscriptionService) addonAttachProrationRequest(
 		return nil, nil
 	}
 
-	entries, err := s.buildAddonProrationEntries(ctx, params.getLineItems(), types.ProrationActionAddItem)
+	entries, err := s.addonProrationEntries(ctx, params.getLineItems(), types.ProrationActionAddItem)
 	if err != nil {
 		return nil, err
 	}
@@ -183,13 +186,38 @@ func (s *subscriptionService) settleAddonAttach(
 		return nil
 	}
 
-	settled, err := NewLineItemProrationService(s.ServiceParams).Apply(ctx, *prorationReq)
+	settled, err := s.settleAddonProration(ctx, *prorationReq, prorationChargeInvoiceKey(*prorationReq), SettleModeIssue)
 	if err != nil {
 		logFailure(err)
 		return nil
 	}
 
-	return settled
+	return settled.Changed
+}
+
+// settleAddonProration prices one addon change and settles it as one document spanning
+// effectiveDate → current period end.
+func (s *subscriptionService) settleAddonProration(
+	ctx context.Context,
+	req LineItemProrationRequest,
+	idempotencyKey string,
+	mode SettleMode,
+) (*SettleProrationResult, error) {
+	prorationSvc := NewLineItemProrationService(s.ServiceParams)
+
+	quote, err := prorationSvc.Compute(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	settleReq := NewSettleProrationRequest(
+		req.Subscription, quote, req.EffectiveDate, req.Subscription.CurrentPeriodEnd,
+		"Subscription update", idempotencyKey, mode,
+	)
+	settleReq.Reason = req.Reason
+	settleReq.AttemptPayment = true
+
+	return prorationSvc.Settle(ctx, settleReq)
 }
 
 func (s *subscriptionService) settleAddAddonPayFirst(
@@ -240,11 +268,21 @@ func (s *subscriptionService) settleAddAddonPayFirst(
 		return nil, err
 	}
 
-	draftInvoice, err := s.createAddonProrationDraftInvoice(ctx, params, summary)
+	// The draft locks exactly what pay-later would have billed.
+	drafted, err := NewLineItemProrationService(s.ServiceParams).Settle(ctx, NewSettleProrationRequest(
+		sub, summary, params.getEffectiveDate(), sub.CurrentPeriodEnd,
+		"Subscription update", params.prorationIdempotencyKey(), SettleModeDraft,
+	))
 	if err != nil {
+		s.Logger.Error(ctx, "failed to create draft proration invoice for payment-gated addon attach",
+			"error", err,
+			"subscription_id", sub.ID,
+			"association_id", pendingAssociation.ID,
+		)
 		s.archivePendingAddonAssociation(ctx, pendingAssociation, err)
 		return nil, err
 	}
+	draftInvoice := drafted.Draft
 
 	checkoutSvc := NewCheckoutSessionService(s.ServiceParams)
 	sessionResp, err := checkoutSvc.StartPayFirstCheckoutSession(ctx, &dto.PayFirstCheckoutRequest{
@@ -271,47 +309,6 @@ func (s *subscriptionService) settleAddAddonPayFirst(
 		CheckoutSession:  sessionResp,
 		Invoice:          latestInvoice,
 	}, nil
-}
-
-// createAddonProrationDraftInvoice locks the charge on a DRAFT ONE_OFF using the same request
-// builder the pay-later charge uses, so the amount the customer is asked to pay is exactly the
-// amount pay-later would have billed.
-func (s *subscriptionService) createAddonProrationDraftInvoice(
-	ctx context.Context,
-	params *addonAttachParams,
-	summary *LineItemProrationSummary,
-) (*dto.InvoiceResponse, error) {
-	if !summary.TotalChargeAmount.GreaterThan(decimal.Zero) || len(summary.ChargeLineItems) == 0 {
-		return nil, ierr.NewError("no proration charge to collect via checkout").
-			WithHint("Expected a positive proration charge").
-			Mark(ierr.ErrValidation)
-	}
-
-	req := buildLineItemProrationChargeInvoiceRequest(
-		params.getSubscription(),
-		summary,
-		params.getEffectiveDate(),
-		params.prorationIdempotencyKey(),
-	)
-	req.SourceType = types.InvoiceSourceTypeCheckout
-
-	inv, skipped, err := NewInvoiceService(s.ServiceParams).CreateComputedDraftInvoice(ctx, req)
-	if err != nil {
-		s.Logger.Error(ctx, "failed to create draft proration invoice for payment-gated addon attach",
-			"error", err,
-			"subscription_id", params.getSubscription().ID,
-			"association_id", params.getAssociation().ID,
-		)
-		return nil, err
-	}
-	if skipped {
-		return nil, ierr.NewError("draft invoice was skipped").
-			WithHint("Expected a non-zero invoice amount").
-			WithReportableDetails(map[string]any{"invoice_id": inv.GetId()}).
-			Mark(ierr.ErrValidation)
-	}
-
-	return inv, nil
 }
 
 func (s *subscriptionService) getAnyPendingAddonCheckoutSession(
@@ -437,16 +434,18 @@ func (s *subscriptionService) DetachAddon(
 	}
 
 	if req.PreviewOnly {
-		summary, err := s.calculateAddonDetachProration(ctx, params)
+		prorationReq, err := s.addonDetachProrationRequest(ctx, params)
 		if err != nil {
 			return nil, err
 		}
 
-		changedInvoices, err := s.previewAddonSettlement(
-			ctx, params.getSubscription(), summary, params.getEffectiveDate(),
-		)
-		if err != nil {
-			return nil, err
+		changedInvoices := []dto.ChangedInvoice{}
+		if prorationReq != nil {
+			quoted, err := s.settleAddonProration(ctx, *prorationReq, "", SettleModePreview)
+			if err != nil {
+				return nil, err
+			}
+			changedInvoices = quoted.Changed
 		}
 
 		// The cancelled association persistAddonDetach would write, built but not saved.
@@ -472,45 +471,6 @@ func (s *subscriptionService) DetachAddon(
 		ChangedInvoices: s.settleAddonDetach(ctx, params),
 		EffectiveDate:   params.getEffectiveDate(),
 	}, nil
-}
-
-// previewAddonSettlement quotes what Apply would raise, through the same invoice request builder
-// and the same two independent branches, so preview and execute cannot drift.
-func (s *subscriptionService) previewAddonSettlement(
-	ctx context.Context,
-	sub *subscription.Subscription,
-	summary *LineItemProrationSummary,
-	effectiveDate time.Time,
-) ([]dto.ChangedInvoice, error) {
-	quoted := make([]dto.ChangedInvoice, 0, 2)
-
-	if summary.TotalChargeAmount.GreaterThan(decimal.Zero) && len(summary.ChargeLineItems) > 0 {
-		inv, err := NewInvoiceService(s.ServiceParams).CreatePreviewInvoice(
-			ctx, buildLineItemProrationChargeInvoiceRequest(sub, summary, effectiveDate, ""),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		quoted = append(quoted, dto.ChangedInvoice{
-			Action:  dto.ChangedInvoiceActionCreated,
-			Status:  dto.ChangedInvoiceStatusPreview,
-			Invoice: inv,
-		})
-	}
-
-	if summary.TotalCreditAmount.GreaterThan(decimal.Zero) {
-		quoted = append(quoted, walletCreditChangedInvoice(&dto.WalletTransactionResponse{
-			Transaction: &wallet.Transaction{
-				CustomerID:        sub.GetInvoicingCustomerID(),
-				Amount:            summary.TotalCreditAmount,
-				Currency:          sub.Currency,
-				TransactionReason: types.TransactionReasonSubscriptionCredit,
-			},
-		}, dto.ChangedInvoiceStatusPreview))
-	}
-
-	return quoted, nil
 }
 
 // createAddonDetachParams resolves everything a removal needs — validations, the association,
@@ -641,7 +601,7 @@ func (s *subscriptionService) addonDetachProrationRequest(
 		return nil, nil
 	}
 
-	entries, err := s.buildAddonProrationEntries(ctx, params.getLineItems(), types.ProrationActionRemoveItem)
+	entries, err := s.addonProrationEntries(ctx, params.getLineItems(), types.ProrationActionRemoveItem)
 	if err != nil {
 		return nil, err
 	}
@@ -654,21 +614,6 @@ func (s *subscriptionService) addonDetachProrationRequest(
 		Reason:         params.getReason(),
 		IdempotencyKey: params.prorationIdempotencyKey(),
 	}, nil
-}
-
-func (s *subscriptionService) calculateAddonDetachProration(
-	ctx context.Context,
-	params *addonDetachParams,
-) (*LineItemProrationSummary, error) {
-	req, err := s.addonDetachProrationRequest(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-	if req == nil {
-		return emptyProrationSummary(params.getSubscription()), nil
-	}
-
-	return NewLineItemProrationService(s.ServiceParams).Compute(ctx, *req)
 }
 
 // persistAddonDetach cancels the association, ends its line items and stops future credit grants
@@ -741,11 +686,11 @@ func (s *subscriptionService) settleAddonDetach(
 		return nil
 	}
 
-	settled, err := NewLineItemProrationService(s.ServiceParams).Apply(ctx, *prorationReq)
+	settled, err := s.settleAddonProration(ctx, *prorationReq, prorationReq.IdempotencyKey, SettleModeIssue)
 	if err != nil {
 		logFailure(err)
 		return nil
 	}
 
-	return settled
+	return settled.Changed
 }

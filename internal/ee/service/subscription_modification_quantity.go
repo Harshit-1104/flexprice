@@ -884,40 +884,44 @@ func (s *subscriptionModificationService) createAggregatedProrationDraftInvoice(
 			Mark(ierr.ErrValidation)
 	}
 
-	req := buildAggregatedProrationChargeInvoiceRequest(sub, items)
-	req.SourceType = types.InvoiceSourceTypeCheckout
+	quote, periodStart, idempKey := aggregatedProrationQuote(sub, items)
 
-	invoiceSvc := NewInvoiceService(s.serviceParams)
-	inv, skipped, err := invoiceSvc.CreateComputedDraftInvoice(ctx, req)
+	settleReq := NewSettleProrationRequest(
+		sub, quote, periodStart, sub.CurrentPeriodEnd,
+		"Quantity change", idempKey, SettleModeDraft,
+	)
+
+	settled, err := NewLineItemProrationService(s.serviceParams).Settle(ctx, settleReq)
 	if err != nil {
 		return nil, err
 	}
-	if skipped {
-		return nil, ierr.NewError("draft invoice was skipped").
-			WithHint("Expected a non-zero invoice amount").
-			WithReportableDetails(map[string]any{
-				"invoice_id": inv.GetId(),
-			}).
-			Mark(ierr.ErrValidation)
-	}
-	return inv, nil
+
+	return settled.Draft, nil
 }
 
-func buildAggregatedProrationChargeInvoiceRequest(
+// aggregatedProrationQuote folds quantity change's own proration items into the shared quote
+// Settle takes, splitting them into charges and credits by sign.
+func aggregatedProrationQuote(
 	sub *subscription.Subscription,
 	items []*quantityChangeProrationItem,
-) dto.CreateInvoiceRequest {
-	lineItems := make([]dto.CreateInvoiceLineItemRequest, 0, len(items))
-	total := decimal.Zero
+) (*LineItemProrationSummary, time.Time, string) {
+	quote := emptyProrationSummary(sub)
 	var periodStart *time.Time
-	periodEnd := sub.CurrentPeriodEnd
-	billingPeriod := string(sub.BillingPeriod)
 	keyParts := make([]prorationChargeKeyPart, 0, len(items))
 
 	for _, item := range items {
 		single := buildProrationChargeInvoiceRequest(sub, item)
-		total = total.Add(single.AmountDue)
-		lineItems = append(lineItems, single.LineItems...)
+
+		for _, line := range single.LineItems {
+			if line.Amount.IsNegative() {
+				quote.CreditLineItems = append(quote.CreditLineItems, line)
+				quote.TotalCreditAmount = quote.TotalCreditAmount.Add(line.Amount.Abs())
+				continue
+			}
+			quote.ChargeLineItems = append(quote.ChargeLineItems, line)
+			quote.TotalChargeAmount = quote.TotalChargeAmount.Add(line.Amount)
+		}
+
 		if single.PeriodStart != nil && (periodStart == nil || single.PeriodStart.Before(*periodStart)) {
 			periodStart = single.PeriodStart
 		}
@@ -928,23 +932,7 @@ func buildAggregatedProrationChargeInvoiceRequest(
 		}
 	}
 
-	idempKey := prorationChargeIdempotencyKey(sub.ID, keyParts)
-	return dto.CreateInvoiceRequest{
-		CustomerID:     sub.GetInvoicingCustomerID(),
-		SubscriptionID: &sub.ID,
-		InvoiceType:    types.InvoiceTypeOneOff,
-		Currency:       sub.Currency,
-		BillingReason:  types.InvoiceBillingReasonSubscriptionUpdate,
-		AmountDue:      total,
-		Total:          total,
-		Subtotal:       total,
-		PeriodStart:    periodStart,
-		PeriodEnd:      &periodEnd,
-		BillingPeriod:  &billingPeriod,
-		LineItems:      lineItems,
-		IdempotencyKey: &idempKey,
-		Metadata:       types.WithCollapsedInvoiceDisplayName(nil, "Quantity change"),
-	}
+	return quote, lo.FromPtr(periodStart), prorationChargeIdempotencyKey(sub.ID, keyParts)
 }
 
 // createProrationChargeInvoice creates a ONE_OFF proration charge for one B item.

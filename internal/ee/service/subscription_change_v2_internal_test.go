@@ -14,39 +14,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func planChangeMove(amount int64, quantity int64) *lineItemChange {
-	return &lineItemChange{
-		lineItem: &subscription.SubscriptionLineItem{
+func planChangeMove(amount int64, quantity int64) LineItemProrationEntry {
+	return LineItemProrationEntry{
+		LineItem: &subscription.SubscriptionLineItem{
 			ID:       "subs_line_" + decimal.NewFromInt(amount).String(),
 			Quantity: decimal.NewFromInt(quantity),
 		},
-		price: &price.Price{Amount: decimal.NewFromInt(amount)},
+		Price: &price.Price{Amount: decimal.NewFromInt(amount)},
 	}
 }
 
 func TestPlanChangeType_CountsQuantity(t *testing.T) {
 	tests := []struct {
 		name    string
-		closing []*lineItemChange
-		opening []*lineItemChange
+		closing []LineItemProrationEntry
+		opening []LineItemProrationEntry
 		want    types.SubscriptionChangeType
 	}{
 		{
 			name:    "ten seats at $5 out, one $20 line in, is a downgrade",
-			closing: []*lineItemChange{planChangeMove(5, 10)},
-			opening: []*lineItemChange{planChangeMove(20, 1)},
+			closing: []LineItemProrationEntry{planChangeMove(5, 10)},
+			opening: []LineItemProrationEntry{planChangeMove(20, 1)},
 			want:    types.SubscriptionChangeTypeDowngrade,
 		},
 		{
 			name:    "same unit price, more seats, is an upgrade",
-			closing: []*lineItemChange{planChangeMove(5, 2)},
-			opening: []*lineItemChange{planChangeMove(5, 3)},
+			closing: []LineItemProrationEntry{planChangeMove(5, 2)},
+			opening: []LineItemProrationEntry{planChangeMove(5, 3)},
 			want:    types.SubscriptionChangeTypeUpgrade,
 		},
 		{
 			name:    "same money either side is lateral",
-			closing: []*lineItemChange{planChangeMove(10, 3)},
-			opening: []*lineItemChange{planChangeMove(30, 1)},
+			closing: []LineItemProrationEntry{planChangeMove(10, 3)},
+			opening: []LineItemProrationEntry{planChangeMove(30, 1)},
 			want:    types.SubscriptionChangeTypeLateral,
 		},
 	}
@@ -186,7 +186,10 @@ func TestPlanChangeInvoiceRequest_SetsCollapsedInvoiceDisplayName(t *testing.T) 
 				changeType:  tt.changeType,
 			}
 
-			req := planChangeInvoiceRequest(r, &LineItemProrationSummary{})
+			req := buildNettedProrationInvoiceRequest(NewSettleProrationRequest(
+				r.currentSub, &LineItemProrationSummary{}, r.effectiveAt, r.updatedSub.CurrentPeriodEnd,
+				planChangeCollapsedInvoiceDisplayName(r), "", SettleModeIssue,
+			))
 			assert.Equal(t, tt.want, types.CollapsedInvoiceDisplayName(req.Metadata))
 		})
 	}

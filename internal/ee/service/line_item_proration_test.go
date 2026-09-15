@@ -519,7 +519,7 @@ func (s *LineItemProrationServiceSuite) TestCompute_RemoveItem_OnetimeAddon() {
 
 	s.True(summary.TotalCreditAmount.IsZero(), "onetime addon remove must not produce a credit")
 	s.True(summary.TotalChargeAmount.IsZero())
-	s.Empty(summary.Results, "no proration result expected for onetime remove")
+	s.Empty(summary.CreditLineItems, "no proration line expected for onetime remove")
 }
 
 func (s *LineItemProrationServiceSuite) TestCompute_SkipsUsagePrice() {
@@ -546,7 +546,7 @@ func (s *LineItemProrationServiceSuite) TestCompute_SkipsUsagePrice() {
 	s.NoError(err)
 	s.NotNil(summary)
 	s.True(summary.TotalChargeAmount.IsZero(), "usage price must be skipped")
-	s.Empty(summary.Results)
+	s.Empty(summary.ChargeLineItems)
 }
 
 func (s *LineItemProrationServiceSuite) TestCompute_NoneProrationBehavior() {
@@ -603,7 +603,8 @@ func (s *LineItemProrationServiceSuite) TestCompute_MultipleEntries_AddAndRemove
 
 	summary, err := s.svc.Compute(ctx, req)
 	s.NoError(err)
-	s.Len(summary.Results, 2)
+	s.Len(summary.ChargeLineItems, 1)
+	s.Len(summary.CreditLineItems, 1)
 
 	expected, _ := decimal.NewFromString("13.33")
 	s.True(summary.TotalCreditAmount.Equal(expected), "remove credit mismatch: %s", summary.TotalCreditAmount)
@@ -627,7 +628,7 @@ func (s *LineItemProrationServiceSuite) TestApply_AddItem_CreatesOneOffInvoice()
 		}},
 	}
 
-	_, err := s.svc.Apply(ctx, req)
+	_, err := s.applyViaSettle(req)
 	s.NoError(err)
 
 	invoices, listErr := s.GetStores().InvoiceRepo.List(ctx, &types.InvoiceFilter{
@@ -675,7 +676,7 @@ func (s *LineItemProrationServiceSuite) TestApply_TwoChangesSameEffectiveDate_Bi
 	s.NoError(s.GetStores().SubscriptionLineItemRepo.Create(ctx, secondLineItem))
 
 	applyAdd := func(lineItem *subscription.SubscriptionLineItem, p *price.Price, key string) error {
-		_, applyErr := s.svc.Apply(ctx, LineItemProrationRequest{
+		_, applyErr := s.applyViaSettle(LineItemProrationRequest{
 			Subscription:   s.subCopyWithPeriod(s.td.periodStart, s.td.periodEnd),
 			EffectiveDate:  effectiveDate,
 			Behavior:       types.ProrationBehaviorCreateProrations,
@@ -732,9 +733,9 @@ func (s *LineItemProrationServiceSuite) TestApply_SameChangeTwice_IsIdempotent()
 		}},
 	}
 
-	_, applyErr := s.svc.Apply(ctx, req)
+	_, applyErr := s.applyViaSettle(req)
 	s.NoError(applyErr)
-	_, _ = s.svc.Apply(ctx, req)
+	_, _ = s.applyViaSettle(req)
 
 	invoices, err := s.GetStores().InvoiceRepo.List(ctx, &types.InvoiceFilter{
 		QueryFilter: types.NewDefaultQueryFilter(),
@@ -761,7 +762,7 @@ func (s *LineItemProrationServiceSuite) TestApply_RemoveItem_CreatesWalletCredit
 		}},
 	}
 
-	_, err := s.svc.Apply(ctx, req)
+	_, err := s.applyViaSettle(req)
 	s.NoError(err)
 
 	wallets, listErr := s.GetStores().WalletRepo.GetWalletsByFilter(ctx, &types.WalletFilter{
@@ -792,7 +793,7 @@ func (s *LineItemProrationServiceSuite) TestApply_NoneProrationBehavior_IsNoOp()
 		}},
 	}
 
-	_, err := s.svc.Apply(ctx, req)
+	_, err := s.applyViaSettle(req)
 	s.NoError(err)
 
 	invoices, _ := s.GetStores().InvoiceRepo.List(ctx, &types.InvoiceFilter{
@@ -825,7 +826,7 @@ func (s *LineItemProrationServiceSuite) TestApply_OnetimeRemove_IsNoOp() {
 		}},
 	}
 
-	_, err := s.svc.Apply(ctx, req)
+	_, err := s.applyViaSettle(req)
 	s.NoError(err)
 
 	wallets, _ := s.GetStores().WalletRepo.GetWalletsByFilter(ctx, &types.WalletFilter{
@@ -835,7 +836,6 @@ func (s *LineItemProrationServiceSuite) TestApply_OnetimeRemove_IsNoOp() {
 }
 
 func (s *LineItemProrationServiceSuite) TestApply_RemoveItem_IdempotencyKeyUsed() {
-	ctx := s.GetContext()
 	effectiveDate := time.Date(2026, 4, 11, 0, 0, 0, 0, time.UTC)
 
 	s.recordBilled(s.td.lineItem.ID, decimal.NewFromInt(20))
@@ -852,10 +852,10 @@ func (s *LineItemProrationServiceSuite) TestApply_RemoveItem_IdempotencyKeyUsed(
 		}},
 	}
 
-	_, err := s.svc.Apply(ctx, req)
+	_, err := s.applyViaSettle(req)
 	s.NoError(err)
 
-	_, err = s.svc.Apply(ctx, req)
+	_, err = s.applyViaSettle(req)
 	s.NoError(err, "duplicate Apply call with same idempotency key must not error")
 }
 

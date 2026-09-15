@@ -12,29 +12,13 @@ import (
 	"github.com/flexprice/flexprice/internal/domain/entitlement"
 	"github.com/flexprice/flexprice/internal/domain/entitlementgrant"
 	"github.com/flexprice/flexprice/internal/domain/plan"
-	"github.com/flexprice/flexprice/internal/domain/price"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
-	"github.com/flexprice/flexprice/internal/domain/wallet"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/idempotency"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
 )
-
-type lineItemChange struct {
-	lineItem *subscription.SubscriptionLineItem
-	price    *price.Price
-
-	// Set only for dropped addon lines (needed to close the association).
-	association *addonassociation.AddonAssociation
-}
-
-func (c lineItemChange) isAddon() bool {
-	return c.lineItem != nil &&
-		c.lineItem.EntityType == types.SubscriptionLineItemEntityTypeAddon &&
-		c.association != nil
-}
 
 type planChangeRequest struct {
 	currentSub *subscription.Subscription
@@ -46,9 +30,9 @@ type planChangeRequest struct {
 	behavior       types.ProrationBehavior
 	idempotencyKey string
 
-	carriedLineItems []*lineItemChange
-	closingLineItems []*lineItemChange
-	openingLineItems []*lineItemChange
+	carriedLineItems []LineItemProrationEntry
+	closingLineItems []LineItemProrationEntry
+	openingLineItems []LineItemProrationEntry
 
 	creditGrants                *planChangeCreditGrants
 	closingEntitlementOverrides []*entitlement.Entitlement
@@ -141,19 +125,19 @@ func (s *subscriptionService) resolvePlanChange(
 	}
 	r.updatedSub = updatedSub
 
-	carried, opening, closing, err := s.resolveLineItems(ctx, sub, targetPrices, toPlan, effectiveAt)
+	carriedLineItems, openingLineItems, closingLineItems, err := s.resolveLineItems(ctx, sub, targetPrices, toPlan, effectiveAt)
 	if err != nil {
 		return nil, err
 	}
 
-	addonsClosing, addonsChanges, addonsWarnings, err := s.resolveAddonChanges(ctx, sub, req)
+	closingAddonLineItems, addonsChanges, addonsWarnings, err := s.resolveAddonChanges(ctx, sub, req)
 	if err != nil {
 		return nil, err
 	}
 
-	r.carriedLineItems = carried
-	r.openingLineItems = opening
-	r.closingLineItems = append(closing, addonsClosing...)
+	r.carriedLineItems = carriedLineItems
+	r.openingLineItems = openingLineItems
+	r.closingLineItems = append(closingLineItems, closingAddonLineItems...)
 	r.changes = addonsChanges
 	r.warnings = addonsWarnings
 	r.changeType = planChangeType(r)
@@ -510,11 +494,11 @@ func (s *subscriptionService) resolveLineItems(
 	targetPrices []*dto.PriceResponse,
 	toPlan *dto.PlanResponse,
 	effectiveAt time.Time,
-) ([]*lineItemChange, []*lineItemChange, []*lineItemChange, error) {
+) ([]LineItemProrationEntry, []LineItemProrationEntry, []LineItemProrationEntry, error) {
 	priceSvc := NewPriceService(s.ServiceParams)
-	var carried, opening, closing []*lineItemChange
+	var carried, opening, closing []LineItemProrationEntry
 
-	current := make([]*lineItemChange, 0, len(sub.LineItems))
+	current := make([]LineItemProrationEntry, 0, len(sub.LineItems))
 	for _, item := range sub.LineItems {
 		if item.EntityType != types.SubscriptionLineItemEntityTypePlan || !item.EndDate.IsZero() {
 			continue
@@ -523,7 +507,7 @@ func (s *subscriptionService) resolveLineItems(
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		current = append(current, &lineItemChange{lineItem: item, price: p.Price})
+		current = append(current, LineItemProrationEntry{LineItem: item, Price: p.Price})
 	}
 
 	matchedTarget := make([]bool, len(targetPrices))
@@ -531,18 +515,20 @@ func (s *subscriptionService) resolveLineItems(
 
 	for i, live := range current {
 		for j, target := range targetPrices {
-			if matchedTarget[j] || !live.price.BillsIdenticallyTo(target.Price) {
+			if matchedTarget[j] || !live.Price.BillsIdenticallyTo(target.Price) {
 				continue
 			}
 
 			matchedTarget[j], matchedCurrent[i] = true, true
-			carried = append(carried, &lineItemChange{lineItem: live.lineItem, price: target.Price})
+			carried = append(carried, LineItemProrationEntry{LineItem: live.LineItem, Price: target.Price})
 			break
 		}
 	}
 
 	for i, live := range current {
+		// If the current line item is not matched to a target price, it is being removed otherwise it is being carried.
 		if !matchedCurrent[i] {
+			live.Action = types.ProrationActionRemoveItem
 			closing = append(closing, live)
 		}
 	}
@@ -556,7 +542,13 @@ func (s *subscriptionService) resolveLineItems(
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		opening = append(opening, &lineItemChange{lineItem: item, price: target.Price})
+
+		opening = append(opening, LineItemProrationEntry{
+			LineItem:    item,
+			Price:       target.Price,
+			Action:      types.ProrationActionAddItem,
+			NewQuantity: item.Quantity,
+		})
 	}
 
 	return carried, opening, closing, nil
@@ -591,14 +583,15 @@ func buildPlanChangeLineItem(
 // Uses recurring amounts (not prorated net) so timing/proration don't change the type.
 func planChangeType(r *planChangeRequest) types.SubscriptionChangeType {
 	oldTotal, newTotal := decimal.Zero, decimal.Zero
-	for _, move := range r.closingLineItems {
-		if move.isAddon() {
+	for _, item := range r.closingLineItems {
+		if item.LineItem.EntityType == types.SubscriptionLineItemEntityTypeAddon {
 			continue
 		}
-		oldTotal = oldTotal.Add(move.price.Amount.Mul(move.lineItem.Quantity))
+		oldTotal = oldTotal.Add(item.Price.Amount.Mul(item.LineItem.Quantity))
 	}
-	for _, move := range r.openingLineItems {
-		newTotal = newTotal.Add(move.price.Amount.Mul(move.lineItem.Quantity))
+
+	for _, item := range r.openingLineItems {
+		newTotal = newTotal.Add(item.Price.Amount.Mul(item.LineItem.Quantity))
 	}
 
 	switch {
@@ -615,9 +608,9 @@ func (s *subscriptionService) resolveAddonChanges(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	req dto.SubscriptionChangeV2Request,
-) ([]*lineItemChange, []*dto.EntityChangeResult, []string, error) {
+) ([]LineItemProrationEntry, []*dto.EntityChangeResult, []string, error) {
 	var changes []*dto.EntityChangeResult
-	var closing []*lineItemChange
+	var closing []LineItemProrationEntry
 	var warnings []string
 
 	var policy *dto.EntityChangePolicy
@@ -636,7 +629,7 @@ func (s *subscriptionService) resolveAddonChanges(
 
 		behaviour := policy.BehaviourFor(association.ID)
 		changes = append(changes, &dto.EntityChangeResult{
-			EntityType:  types.SubscriptionChangeEntityTypeAddon,
+			EntityType:  types.SubscriptionChangeEntityTypeAddonAssociation,
 			ReferenceID: association.AddonID,
 			EntityID:    association.ID,
 			Behaviour:   behaviour,
@@ -646,11 +639,11 @@ func (s *subscriptionService) resolveAddonChanges(
 			continue
 		}
 
-		dropped, err := s.addonLineItemsToClose(ctx, sub.ID, association)
+		droppedItems, err := s.addonLineItemsToClose(ctx, sub.ID, association)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		closing = append(closing, dropped...)
+		closing = append(closing, droppedItems...)
 	}
 
 	// Stale override keys (e.g. preview→execute race) warn instead of failing.
@@ -691,7 +684,7 @@ func (s *subscriptionService) addonLineItemsToClose(
 	ctx context.Context,
 	subscriptionID string,
 	association *addonassociation.AddonAssociation,
-) ([]*lineItemChange, error) {
+) ([]LineItemProrationEntry, error) {
 	filter := types.NewSubscriptionLineItemFilter()
 	filter.SubscriptionIDs = []string{subscriptionID}
 	filter.AddonAssociationIDs = []string{association.ID}
@@ -702,7 +695,7 @@ func (s *subscriptionService) addonLineItemsToClose(
 	}
 
 	priceSvc := NewPriceService(s.ServiceParams)
-	closing := make([]*lineItemChange, 0, len(items))
+	closing := make([]LineItemProrationEntry, 0, len(items))
 	for _, item := range items {
 		if !item.EndDate.IsZero() {
 			continue
@@ -711,24 +704,34 @@ func (s *subscriptionService) addonLineItemsToClose(
 		if err != nil {
 			return nil, err
 		}
-		closing = append(closing, &lineItemChange{
-			lineItem:    item,
-			price:       p.Price,
-			association: association,
+		closing = append(closing, LineItemProrationEntry{
+			LineItem: item,
+			Price:    p.Price,
+			Action:   types.ProrationActionRemoveItem,
 		})
 	}
 	return closing, nil
 }
 
 func (s *subscriptionService) applyDroppedAddons(ctx context.Context, r *planChangeRequest) error {
-	closed := make(map[string]bool)
-	for _, change := range r.closingLineItems {
-		if !change.isAddon() || closed[change.association.ID] {
-			continue
+	ids := make([]string, 0, len(r.changes))
+	for _, change := range r.changes {
+		if change.EntityType == types.SubscriptionChangeEntityTypeAddonAssociation &&
+			change.Behaviour == types.EntityChangeBehaviourDrop {
+			ids = append(ids, change.EntityID)
 		}
-		closed[change.association.ID] = true
+	}
+	if len(ids) == 0 {
+		return nil
+	}
 
-		association := addonassociation.NewAddonAssociationBuilder(change.association).
+	dropped, err := s.AddonAssociationRepo.GetByIDs(ctx, ids)
+	if err != nil {
+		return err
+	}
+
+	for _, existing := range dropped {
+		association := addonassociation.NewAddonAssociationBuilder(existing).
 			WithCancellation(r.effectiveAt, "plan change").
 			Build()
 		if err := s.AddonAssociationRepo.Update(ctx, association); err != nil {
@@ -753,10 +756,9 @@ func (s *subscriptionService) computePlanChange(
 	ctx context.Context,
 	r *planChangeRequest,
 ) (*LineItemProrationSummary, error) {
-	entries := append(
-		prorationEntries(types.ProrationActionRemoveItem, r.closingLineItems),
-		prorationEntries(types.ProrationActionAddItem, r.openingLineItems)...,
-	)
+	entries := make([]LineItemProrationEntry, 0, len(r.closingLineItems)+len(r.openingLineItems))
+	entries = append(entries, r.closingLineItems...)
+	entries = append(entries, r.openingLineItems...)
 
 	if len(entries) == 0 {
 		return emptyProrationSummary(r.currentSub), nil
@@ -964,9 +966,9 @@ func (s *subscriptionService) loadSubscriptionForPlanChange(
 
 func (s *subscriptionService) applyPlanChangeLineItems(ctx context.Context, r *planChangeRequest) error {
 	for _, move := range r.carriedLineItems {
-		updated := subscription.NewSubscriptionLineItemBuilder(move.lineItem).
+		updated := subscription.NewSubscriptionLineItemBuilder(move.LineItem).
 			WithPlan(r.toPlan.ID, r.toPlan.Name).
-			WithPrice(move.price).
+			WithPrice(move.Price).
 			Build()
 
 		if err := s.SubscriptionLineItemRepo.Update(ctx, updated); err != nil {
@@ -975,7 +977,7 @@ func (s *subscriptionService) applyPlanChangeLineItems(ctx context.Context, r *p
 	}
 
 	for _, move := range r.closingLineItems {
-		ended := subscription.NewSubscriptionLineItemBuilder(move.lineItem).
+		ended := subscription.NewSubscriptionLineItemBuilder(move.LineItem).
 			WithEndDate(r.effectiveAt).
 			Build()
 
@@ -989,7 +991,7 @@ func (s *subscriptionService) applyPlanChangeLineItems(ctx context.Context, r *p
 	}
 	toCreate := make([]*subscription.SubscriptionLineItem, 0, len(r.openingLineItems))
 	for _, move := range r.openingLineItems {
-		toCreate = append(toCreate, move.lineItem)
+		toCreate = append(toCreate, move.LineItem)
 	}
 	return s.SubscriptionLineItemRepo.CreateBulk(ctx, toCreate)
 }
@@ -1085,12 +1087,27 @@ func (s *subscriptionService) resetQuote(
 ) (*LineItemProrationSummary, error) {
 	prorationSvc := NewLineItemProrationService(s.ServiceParams)
 
+	creditEntries := make([]LineItemProrationEntry, 0, len(r.closingLineItems)+len(r.carriedLineItems))
+	creditEntries = append(creditEntries, r.closingLineItems...)
+	chargeEntries := make([]LineItemProrationEntry, 0, len(r.openingLineItems)+len(r.carriedLineItems))
+	chargeEntries = append(chargeEntries, r.openingLineItems...)
+
+	for _, carried := range r.carriedLineItems {
+		credit := carried
+		credit.Action = types.ProrationActionRemoveItem
+		creditEntries = append(creditEntries, credit)
+
+		carried.Action = types.ProrationActionAddItem
+		carried.NewQuantity = carried.LineItem.Quantity
+		chargeEntries = append(chargeEntries, carried)
+	}
+
 	var credit *LineItemProrationSummary
 	if r.behavior == types.ProrationBehaviorCreateProrations {
 		var err error
 		credit, err = prorationSvc.Compute(ctx, LineItemProrationRequest{
 			Subscription:  r.currentSub,
-			Entries:       prorationEntries(types.ProrationActionRemoveItem, r.closingLineItems, r.carriedLineItems),
+			Entries:       creditEntries,
 			EffectiveDate: r.effectiveAt,
 			Behavior:      types.ProrationBehaviorCreateProrations,
 			Reason:        "plan change with billing period reset",
@@ -1102,7 +1119,7 @@ func (s *subscriptionService) resetQuote(
 
 	charge, err := prorationSvc.Compute(ctx, LineItemProrationRequest{
 		Subscription:  r.updatedSub,
-		Entries:       prorationEntries(types.ProrationActionAddItem, r.openingLineItems, r.carriedLineItems),
+		Entries:       chargeEntries,
 		EffectiveDate: r.effectiveAt,
 		Behavior:      types.ProrationBehaviorCreateProrations,
 		Reason:        "plan change with billing period reset",
@@ -1111,43 +1128,7 @@ func (s *subscriptionService) resetQuote(
 		return nil, err
 	}
 
-	merged := emptyProrationSummary(r.currentSub)
-	summaries := []*LineItemProrationSummary{credit, charge}
-	for _, summary := range summaries {
-		if summary == nil {
-			continue
-		}
-
-		merged.Results = append(merged.Results, summary.Results...)
-		merged.ChargeLineItems = append(merged.ChargeLineItems, summary.ChargeLineItems...)
-		merged.CreditLineItems = append(merged.CreditLineItems, summary.CreditLineItems...)
-		merged.TotalChargeAmount = merged.TotalChargeAmount.Add(summary.TotalChargeAmount)
-		merged.TotalCreditAmount = merged.TotalCreditAmount.Add(summary.TotalCreditAmount)
-	}
-
-	return merged, nil
-}
-
-func prorationEntries(
-	action types.ProrationAction,
-	moves ...[]*lineItemChange,
-) []LineItemProrationEntry {
-	entries := make([]LineItemProrationEntry, 0)
-	for _, group := range moves {
-		for _, move := range group {
-			entry := LineItemProrationEntry{
-				LineItem: move.lineItem,
-				Price:    move.price,
-				Action:   action,
-			}
-			if action == types.ProrationActionAddItem {
-				entry.NewQuantity = move.lineItem.Quantity
-			}
-			entries = append(entries, entry)
-		}
-	}
-
-	return entries
+	return emptyProrationSummary(r.currentSub).Merge(credit, charge), nil
 }
 
 // outgoingUsageInvoiceRequest bills the usage consumed on the outgoing plan before the
@@ -1253,67 +1234,22 @@ func (s *subscriptionService) settlePlanChange(
 		return changed, nil
 	}
 
-	net := r.settlementQuote.NetAmount()
-	switch {
-	case net.IsPositive():
-		if err := raiseInvoice(planChangeInvoiceRequest(r, r.settlementQuote)); err != nil {
-			return nil, err
-		}
+	settleReq := NewSettleProrationRequest(
+		r.currentSub, r.settlementQuote, r.effectiveAt, r.updatedSub.CurrentPeriodEnd,
+		planChangeCollapsedInvoiceDisplayName(r), planChangeIdempotencyKey(r, ""),
+		lo.Ternary(preview, SettleModePreview, SettleModeIssue),
+	)
+	settleReq.BillingPeriod = r.updatedSub.BillingPeriod
 
-	// A net credit is paid to the wallet, never invoiced.
-	case net.IsNegative() && preview:
-		changed = append(changed, walletCreditChangedInvoice(&dto.WalletTransactionResponse{
-			Transaction: &wallet.Transaction{
-				CustomerID:        r.currentSub.GetInvoicingCustomerID(),
-				Amount:            net.Abs(),
-				Currency:          r.currentSub.Currency,
-				TransactionReason: types.TransactionReasonSubscriptionCredit,
-			},
-		}, dto.ChangedInvoiceStatusPreview))
-
-	case net.IsNegative():
-		txn, err := NewWalletService(s.ServiceParams).TopUpWalletForProratedCharge(
-			ctx, r.currentSub.GetInvoicingCustomerID(), net.Abs(), r.currentSub.Currency,
-			planChangeIdempotencyKey(r, ""),
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		changed = append(changed, walletCreditChangedInvoice(txn, dto.ChangedInvoiceStatusWalletIssued))
+	// Payment is attempted after commit, so the settlement stays inside the transaction.
+	settled, err := NewLineItemProrationService(s.ServiceParams).Settle(ctx, settleReq)
+	if err != nil {
+		return nil, err
 	}
+
+	changed = append(changed, settled.Changed...)
 
 	return changed, nil
-}
-
-// One request, two uses: CreateInvoice raises it on execute, CreatePreviewInvoice
-// quotes it on preview. Anything the quote must reflect belongs here.
-func planChangeInvoiceRequest(r *planChangeRequest, quote *LineItemProrationSummary) dto.CreateInvoiceRequest {
-	lineItems := make([]dto.CreateInvoiceLineItemRequest, 0,
-		len(quote.ChargeLineItems)+len(quote.CreditLineItems))
-	lineItems = append(lineItems, quote.ChargeLineItems...)
-	lineItems = append(lineItems, quote.CreditLineItems...)
-
-	billingPeriod := string(r.updatedSub.BillingPeriod)
-	periodEnd := r.updatedSub.CurrentPeriodEnd
-	idempotencyKey := planChangeIdempotencyKey(r, "")
-
-	return dto.CreateInvoiceRequest{
-		CustomerID:     r.currentSub.GetInvoicingCustomerID(),
-		SubscriptionID: &r.currentSub.ID,
-		InvoiceType:    types.InvoiceTypeOneOff,
-		Currency:       r.currentSub.Currency,
-		BillingReason:  types.InvoiceBillingReasonSubscriptionUpdate,
-		AmountDue:      quote.NetAmount(),
-		Total:          quote.NetAmount(),
-		Subtotal:       quote.NetAmount(),
-		PeriodStart:    &r.effectiveAt,
-		PeriodEnd:      &periodEnd,
-		BillingPeriod:  &billingPeriod,
-		LineItems:      lineItems,
-		IdempotencyKey: &idempotencyKey,
-		Metadata:       types.WithCollapsedInvoiceDisplayName(nil, planChangeCollapsedInvoiceDisplayName(r)),
-	}
 }
 
 func planChangeCollapsedInvoiceDisplayName(r *planChangeRequest) string {
@@ -1389,10 +1325,10 @@ func planChangeChangedLineItems(r *planChangeRequest) []dto.ChangedLineItem {
 	items := make([]dto.ChangedLineItem, 0, len(r.carriedLineItems)+len(r.closingLineItems)+len(r.openingLineItems))
 	for _, move := range r.carriedLineItems {
 		items = append(items, dto.ChangedLineItem{
-			ID:           move.lineItem.ID,
-			PriceID:      move.price.ID,
-			Quantity:     move.lineItem.Quantity,
-			StartDate:    &move.lineItem.StartDate,
+			ID:           move.LineItem.ID,
+			PriceID:      move.Price.ID,
+			Quantity:     move.LineItem.Quantity,
+			StartDate:    &move.LineItem.StartDate,
 			ChangeAction: dto.ChangedLineItemActionUpdated,
 		})
 	}
@@ -1400,21 +1336,21 @@ func planChangeChangedLineItems(r *planChangeRequest) []dto.ChangedLineItem {
 	for _, move := range r.closingLineItems {
 		endDate := r.effectiveAt
 		items = append(items, dto.ChangedLineItem{
-			ID:           move.lineItem.ID,
-			PriceID:      move.lineItem.PriceID,
-			Quantity:     move.lineItem.Quantity,
-			StartDate:    &move.lineItem.StartDate,
+			ID:           move.LineItem.ID,
+			PriceID:      move.LineItem.PriceID,
+			Quantity:     move.LineItem.Quantity,
+			StartDate:    &move.LineItem.StartDate,
 			EndDate:      &endDate,
 			ChangeAction: dto.ChangedLineItemActionEnded,
 		})
 	}
 
 	for _, move := range r.openingLineItems {
-		startDate := move.lineItem.StartDate
+		startDate := move.LineItem.StartDate
 		items = append(items, dto.ChangedLineItem{
-			ID:           move.lineItem.ID,
-			PriceID:      move.lineItem.PriceID,
-			Quantity:     move.lineItem.Quantity,
+			ID:           move.LineItem.ID,
+			PriceID:      move.LineItem.PriceID,
+			Quantity:     move.LineItem.Quantity,
 			StartDate:    &startDate,
 			ChangeAction: dto.ChangedLineItemActionCreated,
 		})

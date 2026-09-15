@@ -615,8 +615,12 @@ func (s *SubscriptionServiceSuite) TestAddAddon_CheckoutNetCharge_PersistsOnlyPe
 	pending.AddonStatus = types.AddonStatusPending
 	s.Require().NoError(s.GetStores().AddonAssociationRepo.Create(ctx, pending))
 
-	draft, err := subService.createAddonProrationDraftInvoice(ctx, plan, summary)
+	drafted, err := NewLineItemProrationService(subService.ServiceParams).Settle(ctx, NewSettleProrationRequest(
+		sub, summary, plan.getEffectiveDate(), sub.CurrentPeriodEnd,
+		"Subscription update", plan.prorationIdempotencyKey(), SettleModeDraft,
+	))
 	s.Require().NoError(err)
+	draft := drafted.Draft
 
 	s.Equal(types.InvoiceStatusDraft, draft.InvoiceStatus)
 	s.Equal(types.InvoiceTypeOneOff, draft.InvoiceType)
@@ -868,8 +872,12 @@ func (s *SubscriptionServiceSuite) seedPayFirstAddonCheckout(
 	pending.AddonStatus = types.AddonStatusPending
 	s.Require().NoError(s.GetStores().AddonAssociationRepo.Create(ctx, pending))
 
-	draft, err := subService.createAddonProrationDraftInvoice(ctx, attach, summary)
+	drafted, err := NewLineItemProrationService(subService.ServiceParams).Settle(ctx, NewSettleProrationRequest(
+		sub, summary, attach.getEffectiveDate(), sub.CurrentPeriodEnd,
+		"Subscription update", attach.prorationIdempotencyKey(), SettleModeDraft,
+	))
 	s.Require().NoError(err)
+	draft := drafted.Draft
 
 	checkoutSvc := &checkoutSessionService{ServiceParams: params}
 	payResp, err := checkoutSvc.createCheckoutPayment(ctx, &draft.Invoice, types.CheckoutPaymentProviderRazorpay)

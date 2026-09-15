@@ -102,7 +102,7 @@ func (p *addonAttachParams) prorationIdempotencyKey() string {
 
 // addonDetachParams is a fully-resolved addon removal that has not been written yet, so it can
 // be priced before anyone decides whether to persist it. createAddonDetachParams builds it,
-// calculateAddonDetachProration prices it, persistAddonDetach writes it.
+// addonDetachProrationRequest prices it, persistAddonDetach writes it.
 type addonDetachParams struct {
 	subscription  *subscription.Subscription
 	association   *addonassociation.AddonAssociation
