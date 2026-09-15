@@ -133,7 +133,7 @@ func (s *subscriptionService) addonAttachProrationRequest(
 		return nil, nil
 	}
 
-	entries, err := s.addonProrationEntries(ctx, params.getLineItems(), types.ProrationActionAddItem)
+	entries, err := s.buildAddonProrationEntries(ctx, params.getLineItems(), types.ProrationActionAddItem)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +601,7 @@ func (s *subscriptionService) addonDetachProrationRequest(
 		return nil, nil
 	}
 
-	entries, err := s.addonProrationEntries(ctx, params.getLineItems(), types.ProrationActionRemoveItem)
+	entries, err := s.buildAddonProrationEntries(ctx, params.getLineItems(), types.ProrationActionRemoveItem)
 	if err != nil {
 		return nil, err
 	}
@@ -622,6 +622,19 @@ func (s *subscriptionService) persistAddonDetach(ctx context.Context, params *ad
 	association := addonassociation.NewAddonAssociationBuilder(params.getAssociation()).
 		WithCancellation(params.getEffectiveDate(), params.getReason()).
 		Build()
+
+	grantService := newSubscriptionGrantService(s.ServiceParams)
+	grantCfg, err := grantService.Resolve(ctx, GrantChangeRequest{
+		Sub: params.getSubscription(),
+		Removed: []GrantSource{{
+			StartDate: params.getEffectiveDate(),
+			Origin:    grantProrationSourceAddonDetach,
+			AddonID:   association.AddonID,
+		}},
+	})
+	if err != nil {
+		return err
+	}
 
 	if err := s.DB.WithTx(ctx, func(ctx context.Context) error {
 		if err := s.AddonAssociationRepo.Update(ctx, association); err != nil {
@@ -649,12 +662,7 @@ func (s *subscriptionService) persistAddonDetach(ctx context.Context, params *ad
 		// Cancel future applications of credit grants materialized from THIS addon only
 		// (scoped by addon_id provenance). Already-granted credits are not clawed back;
 		// plan-sourced and other-addon grants are left untouched.
-		creditGrantService := NewCreditGrantService(s.ServiceParams)
-		return creditGrantService.CancelFutureSubscriptionGrants(ctx, dto.CancelFutureSubscriptionGrantsRequest{
-			SubscriptionID: association.EntityID,
-			AddonIDs:       []string{association.AddonID},
-			EffectiveDate:  lo.ToPtr(params.getEffectiveDate()),
-		})
+		return grantService.Apply(ctx, grantCfg)
 	}); err != nil {
 		return err
 	}
