@@ -782,7 +782,7 @@ func (s *subscriptionService) PreviewPlanChange(
 	subscriptionID string,
 	req dto.SubscriptionChangeV2Request,
 ) (*dto.SubscriptionChangeV2Response, error) {
-	sub, err := s.loadSubscriptionForPlanChange(ctx, subscriptionID, false)
+	sub, err := s.loadSubscriptionForChange(ctx, subscriptionID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +851,7 @@ func (s *subscriptionService) executePlanChangeAt(
 	var resp *dto.SubscriptionChangeV2Response
 
 	err := s.DB.WithTx(ctx, func(txCtx context.Context) error {
-		sub, err := s.loadSubscriptionForPlanChange(txCtx, subscriptionID, true)
+		sub, err := s.loadSubscriptionForChange(txCtx, subscriptionID, true)
 		if err != nil {
 			return err
 		}
@@ -942,7 +942,7 @@ func (s *subscriptionService) attemptPlanChangePayment(ctx context.Context, resp
 }
 
 // forUpdate takes the row lock as the first read so concurrent changes serialize.
-func (s *subscriptionService) loadSubscriptionForPlanChange(
+func (s *subscriptionService) loadSubscriptionForChange(
 	ctx context.Context,
 	subscriptionID string,
 	forUpdate bool,
@@ -1591,7 +1591,7 @@ func (s *subscriptionService) schedulePlanChangeForPeriodEnd(
 	)
 
 	err := s.DB.WithTx(ctx, func(txCtx context.Context) error {
-		sub, err := s.loadSubscriptionForPlanChange(txCtx, subscriptionID, true)
+		sub, err := s.loadSubscriptionForChange(txCtx, subscriptionID, true)
 		if err != nil {
 			return err
 		}

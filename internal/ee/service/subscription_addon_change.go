@@ -21,9 +21,6 @@ type AddonChangeService interface {
 
 	Resolve(ctx context.Context, req AddonChangeRequest) (*addonChangeConfig, error)
 
-	// Apply persists a resolved config in its own transaction and settles it.
-	Apply(ctx context.Context, config *addonChangeConfig) (*SettleProrationResult, error)
-
 	Persist(ctx context.Context, config *addonChangeConfig) error
 
 	Settle(ctx context.Context, config *addonChangeConfig, mode SettleMode) (*SettleProrationResult, error)
@@ -492,36 +489,51 @@ func (s *addonChangeService) Settle(
 		"Subscription update", idempotencyKey, mode,
 	)
 	req.Reason = config.getReason()
-	req.AttemptPayment = true
 
 	return NewLineItemProrationService(s.ServiceParams).Settle(ctx, req)
 }
 
+// Execute applies the batch as one transaction with the subscription row locked as its first
+// statement, so concurrent changes serialise and a settlement failure rolls the change back.
 func (s *addonChangeService) Execute(
 	ctx context.Context,
 	req AddonChangeRequest,
 ) (*addonChangeConfig, *SettleProrationResult, error) {
-	config, err := s.Resolve(ctx, req)
+	if err := req.Validate(); err != nil {
+		return nil, nil, err
+	}
+
+	var (
+		config  *addonChangeConfig
+		settled *SettleProrationResult
+	)
+
+	subscriptionID := req.Subscription.ID
+	err := s.DB.WithTx(ctx, func(ctx context.Context) error {
+		locked, err := s.sub.loadSubscriptionForChange(ctx, subscriptionID, true)
+		if err != nil {
+			return err
+		}
+		req.Subscription = locked
+
+		if config, err = s.Resolve(ctx, req); err != nil {
+			return err
+		}
+
+		if err := s.Persist(ctx, config); err != nil {
+			return err
+		}
+
+		settled, err = s.Settle(ctx, config, SettleModeIssue)
+		return err
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 
-	settled, err := s.Apply(ctx, config)
-	if err != nil {
-		return nil, nil, err
-	}
+	attemptProrationPayments(ctx, s.ServiceParams, settled.GetChanged())
 
 	return config, settled, nil
-}
-
-func (s *addonChangeService) Apply(ctx context.Context, config *addonChangeConfig) (*SettleProrationResult, error) {
-	if err := s.DB.WithTx(ctx, func(ctx context.Context) error {
-		return s.Persist(ctx, config)
-	}); err != nil {
-		return nil, err
-	}
-
-	return s.settleExecuted(ctx, config), nil
 }
 
 func (s *addonChangeService) Preview(
@@ -539,23 +551,4 @@ func (s *addonChangeService) Preview(
 	}
 
 	return config, settled, nil
-}
-
-// settleExecuted settles a batch that is already committed, so a failure here cannot undo it —
-// it is logged and the change stands unbilled. D2 moves settlement inside the transaction.
-func (s *addonChangeService) settleExecuted(ctx context.Context, config *addonChangeConfig) *SettleProrationResult {
-	settled, err := s.Settle(ctx, config, SettleModeIssue)
-	if err != nil {
-		s.Logger.Error(ctx, "failed to settle addon change; the change was persisted and is UNBILLED for this period",
-			"error", err,
-			"subscription_id", config.getSubscription().ID,
-			"attached", len(config.getAttaches()),
-			"detached", len(config.getDetaches()),
-			"period_start", config.getPeriodStart(),
-			"idempotency_key", config.getIdempotencyKey(),
-		)
-		return nil
-	}
-
-	return settled
 }

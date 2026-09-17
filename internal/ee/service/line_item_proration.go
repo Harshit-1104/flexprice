@@ -112,10 +112,6 @@ type SettleProrationRequest struct {
 	IdempotencyKey string
 	Reason         string
 	Mode           SettleMode
-
-	// AttemptPayment collects the invoice in-line. Callers that settle inside a transaction
-	// leave it false and attempt after commit.
-	AttemptPayment bool
 }
 
 // NewSettleProrationRequest builds a settlement over an already-computed quote. Reason and
@@ -297,8 +293,9 @@ func (s *lineItemProrationService) Settle(ctx context.Context, req *SettleProrat
 			result.Draft = inv
 
 		default:
-			inv, err := s.issueInvoice(ctx, invoiceReq, req.AttemptPayment)
+			inv, err := NewInvoiceService(s.params).CreateInvoice(ctx, invoiceReq)
 			if err != nil {
+				s.params.Logger.Error(ctx, "failed to create proration charge invoice", "error", err)
 				return nil, err
 			}
 			result.Changed = append(result.Changed, dto.ChangedInvoice{
@@ -553,33 +550,32 @@ func prorationChargeInvoiceKey(req LineItemProrationRequest) string {
 	})
 }
 
-func (s *lineItemProrationService) issueInvoice(
-	ctx context.Context,
-	req dto.CreateInvoiceRequest,
-	attemptPayment bool,
-) (*dto.InvoiceResponse, error) {
-	invoiceSvc := NewInvoiceService(s.params)
+// attemptProrationPayments collects settled proration invoices and refreshes what changed. It
+// does outbound I/O — wallet debits and a gateway charge — so it runs only after the caller's
+// transaction has committed.
+func attemptProrationPayments(ctx context.Context, params ServiceParams, changed []dto.ChangedInvoice) {
+	invoiceSvc := NewInvoiceService(params)
 
-	inv, err := invoiceSvc.CreateInvoice(ctx, req)
-	if err != nil {
-		s.params.Logger.Error(ctx, "failed to create proration charge invoice", "error", err)
-		return nil, err
-	}
-	if !attemptPayment {
-		return inv, nil
-	}
+	for i := range changed {
+		inv := changed[i].Invoice
+		if inv == nil || inv.ID == "" {
+			continue
+		}
 
-	if err := invoiceSvc.AttemptPayment(ctx, inv.ID); err != nil {
-		s.params.Logger.Info(ctx, "failed to attempt payment for proration charge invoice",
-			"error", err, "invoice_id", inv.ID)
-	}
+		if err := invoiceSvc.AttemptPayment(ctx, inv.ID); err != nil {
+			params.Logger.Info(ctx, "proration invoice created but payment attempt failed; invoice remains collectable",
+				"error", err, "invoice_id", inv.ID)
+		}
 
-	if latest, err := s.params.InvoiceRepo.Get(ctx, inv.ID); err == nil && latest != nil {
+		latest, err := params.InvoiceRepo.Get(ctx, inv.ID)
+		if err != nil || latest == nil {
+			continue
+		}
+
 		inv.InvoiceStatus = latest.InvoiceStatus
 		inv.PaymentStatus = latest.PaymentStatus
 		inv.AmountPaid = latest.AmountPaid
 		inv.AmountRemaining = latest.AmountRemaining
+		changed[i].Status = dto.ChangedInvoiceStatusFromPaymentStatus(latest.PaymentStatus)
 	}
-
-	return inv, nil
 }

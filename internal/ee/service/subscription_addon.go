@@ -49,13 +49,15 @@ func (s *subscriptionService) AttachAddon(
 			return nil, err
 		}
 
-		config, err := changeSvc.Resolve(ctx, changeReq)
+		// Quoted without the row lock: the provider call cannot sit inside a transaction, so
+		// pay-first commits its pending state separately.
+		quoted, err := changeSvc.Resolve(ctx, changeReq)
 		if err != nil {
 			return nil, err
 		}
 
-		if config.getQuote().TotalChargeAmount.GreaterThan(decimal.Zero) {
-			resp, err := s.settleAddAddonPayFirst(ctx, config.getAttaches()[0], config.getQuote(), checkout)
+		if quoted.getQuote().TotalChargeAmount.GreaterThan(decimal.Zero) {
+			resp, err := s.settleAddAddonPayFirst(ctx, quoted.getAttaches()[0], quoted.getQuote(), checkout)
 			if err != nil {
 				return nil, err
 			}
@@ -66,14 +68,7 @@ func (s *subscriptionService) AttachAddon(
 				Invoice:         resp.Invoice,
 			}, nil
 		}
-
 		// Zero or negative net → nothing to collect, so fall through and attach immediately.
-		settled, err := changeSvc.Apply(ctx, config)
-		if err != nil {
-			return nil, err
-		}
-
-		return attachChangeResult(config, settled), nil
 	}
 
 	config, settled, err := changeSvc.Execute(ctx, changeReq)
@@ -265,19 +260,21 @@ func (s *subscriptionService) applyAddAddonCheckoutParams(ctx context.Context, p
 		return err
 	}
 
-	sub, lineItems, err := s.SubRepo.GetWithLineItems(ctx, params.SubscriptionID)
-	if err != nil {
-		return err
-	}
-	sub.LineItems = lineItems
-
-	for _, ref := range params.Addons {
-		if err := s.applyAddAddonRef(ctx, sub, ref); err != nil {
+	// One transaction, row locked first, for every ref the session gated.
+	return s.DB.WithTx(ctx, func(ctx context.Context) error {
+		sub, err := s.loadSubscriptionForChange(ctx, params.SubscriptionID, true)
+		if err != nil {
 			return err
 		}
-	}
 
-	return nil
+		for _, ref := range params.Addons {
+			if err := s.applyAddAddonRef(ctx, sub, ref); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 func (s *subscriptionService) applyAddAddonRef(
@@ -331,9 +328,7 @@ func (s *subscriptionService) applyAddAddonRef(
 	}
 
 	// No settlement: the charge is already locked on the session's draft invoice.
-	return s.DB.WithTx(ctx, func(ctx context.Context) error {
-		return changeSvc.Persist(ctx, config)
-	})
+	return changeSvc.Persist(ctx, config)
 }
 
 // DetachAddon removes an addon and credits back the unused prepaid time it paid for. It is a
