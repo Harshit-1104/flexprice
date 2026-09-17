@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/flexprice/flexprice/internal/api/dto"
+	"github.com/flexprice/flexprice/internal/domain/entitlement"
+	"github.com/flexprice/flexprice/internal/domain/entitlementgrant"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
@@ -26,14 +28,18 @@ type SubscriptionGrantService interface {
 
 // GrantSource is one contributor to the change, with its own dates and provenance.
 type GrantSource struct {
-	// StartDate anchors this source's grant chain.
-	StartDate time.Time
+	// ChangeType says whether this source reaches the current cycle at all. A custom date is
+	// scheduled and re-enters as immediate when it fires.
+	ChangeType types.ScheduleType
+	// EffectiveDate is when this source joins or leaves: it anchors the source's credit
+	// grant chain and dates its entitlement grant proration.
+	EffectiveDate time.Time
 	// EndDate caps recurring grants at a time-bounded (onetime) addon's boundary.
 	EndDate  *time.Time
 	Behavior types.ProrationBehavior
 	Origin   grantProrationSource
-	// AddonID is credit-grant provenance: templates are read from it and removal
-	// targets the grants it materialized.
+	// AddonID is the source's identity: credit grant templates and entitlement configs are
+	// both read from it, and removal targets the grants it materialized.
 	AddonID string
 }
 
@@ -51,22 +57,16 @@ type GrantChangeRequest struct {
 type GrantChangeConfig struct {
 	sub *subscription.Subscription
 
-	creditGroups  []creditGrantGroup
-	cancellations []creditGrantCancellation
-}
+	creditGrantsToAdd    []dto.CreateSubscriptionGrantsRequest
+	creditGrantsToCancel []dto.CancelFutureSubscriptionGrantsRequest
 
-// creditGrantGroup is the set of grant requests sharing one anchoring, so
-// materializeCreditGrants runs once per group rather than once per source.
-type creditGrantGroup struct {
-	requests  []dto.CreateCreditGrantRequest
-	startDate time.Time
-	endDate   *time.Time
-	proration *dto.FirstPeriodProration
-}
+	// entitlementGrantsToAdd is one prorated segment per feature the incoming sources feed,
+	// pooled so two addons landing on one feature share a successor.
+	entitlementGrantsToAdd []*entitlementgrant.EntitlementGrant
+	entitlementsToRemove   []*entitlement.Entitlement
 
-type creditGrantCancellation struct {
-	addonIDs      []string
-	effectiveDate time.Time
+	incomingECs          []*entitlement.Entitlement
+	existingECsByFeature map[string][]*entitlement.Entitlement
 }
 
 type subscriptionGrantService struct {
@@ -89,13 +89,31 @@ func (s *subscriptionGrantService) Resolve(ctx context.Context, req GrantChangeR
 
 	cfg := &GrantChangeConfig{sub: req.Sub}
 
-	creditGroups, err := s.resolveCreditGrantGroups(ctx, req.Sub, req.Incoming)
+	creditGrantsToAdd, err := s.resolveCreditGrantToCreate(ctx, req.Sub, req.Incoming)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.creditGroups = creditGroups
-	cfg.cancellations = resolveCreditGrantCancellations(req.Removed)
+	cfg.creditGrantsToAdd = creditGrantsToAdd
+	cfg.creditGrantsToCancel = resolveCreditGrantCancellations(req.Sub, req.Removed)
+
+	if cfg.entitlementsToRemove, err = s.resolveGrantECs(ctx, req.Removed); err != nil {
+		return nil, err
+	}
+
+	if cfg.existingECsByFeature, err = s.resolveExistingGrantECs(ctx, req.Sub, cfg.entitlementsToRemove); err != nil {
+		return nil, err
+	}
+
+	cfg.incomingECs, cfg.entitlementGrantsToAdd, err = s.resolveIncomingGrants(
+		ctx,
+		req.Sub,
+		req.Incoming,
+		cfg.existingECsByFeature,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -106,24 +124,14 @@ func (s *subscriptionGrantService) Apply(ctx context.Context, cfg *GrantChangeCo
 	}
 
 	creditGrantService := NewCreditGrantService(s.ServiceParams)
-	for _, group := range cfg.creditGroups {
-		if err := creditGrantService.CreateSubscriptionGrants(ctx, dto.CreateSubscriptionGrantsRequest{
-			Subscription:         cfg.sub,
-			Grants:               group.requests,
-			StartDate:            group.startDate,
-			EndDate:              group.endDate,
-			FirstPeriodProration: group.proration,
-		}); err != nil {
+	for _, req := range cfg.creditGrantsToAdd {
+		if err := creditGrantService.CreateSubscriptionGrants(ctx, req); err != nil {
 			return err
 		}
 	}
 
-	for _, cancellation := range cfg.cancellations {
-		if err := creditGrantService.CancelFutureSubscriptionGrants(ctx, dto.CancelFutureSubscriptionGrantsRequest{
-			SubscriptionID: cfg.sub.ID,
-			AddonIDs:       cancellation.addonIDs,
-			EffectiveDate:  lo.ToPtr(cancellation.effectiveDate),
-		}); err != nil {
+	for _, req := range cfg.creditGrantsToCancel {
+		if err := creditGrantService.CancelFutureSubscriptionGrants(ctx, req); err != nil {
 			return err
 		}
 	}
@@ -131,14 +139,14 @@ func (s *subscriptionGrantService) Apply(ctx context.Context, cfg *GrantChangeCo
 	return nil
 }
 
-// resolveCreditGrantGroups clones each incoming addon's ADDON-scoped credit grant templates
+// resolveCreditGrantToCreate clones each incoming addon's ADDON-scoped credit grant templates
 // into SUBSCRIPTION-scoped requests, then groups the sources that share an anchoring so the
 // whole batch materializes in as few passes as there are distinct anchorings.
-func (s *subscriptionGrantService) resolveCreditGrantGroups(
+func (s *subscriptionGrantService) resolveCreditGrantToCreate(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	incoming []GrantSource,
-) ([]creditGrantGroup, error) {
+) ([]dto.CreateSubscriptionGrantsRequest, error) {
 	addonIDs := lo.Compact(lo.Map(incoming, func(src GrantSource, _ int) string { return src.AddonID }))
 	if len(addonIDs) == 0 {
 		return nil, nil
@@ -149,7 +157,7 @@ func (s *subscriptionGrantService) resolveCreditGrantGroups(
 		return nil, err
 	}
 
-	groups := make([]creditGrantGroup, 0, len(incoming))
+	groups := make([]dto.CreateSubscriptionGrantsRequest, 0, len(incoming))
 	index := make(map[string]int, len(incoming))
 	for _, src := range incoming {
 		grants := templates[src.AddonID]
@@ -162,19 +170,20 @@ func (s *subscriptionGrantService) resolveCreditGrantGroups(
 			"subscription_id", sub.ID,
 			"credit_grants_count", len(grants))
 
-		proration := s.addonCreditGrantProration(ctx, sub, src.StartDate, src.Behavior)
+		proration := s.addonCreditGrantProration(ctx, sub, src.EffectiveDate, src.Behavior)
 		key := creditGrantGroupKey(src, proration)
 		if i, ok := index[key]; ok {
-			groups[i].requests = append(groups[i].requests, creditGrantRequestsFromAddon(sub, src.AddonID, grants)...)
+			groups[i].Grants = append(groups[i].Grants, creditGrantRequestsFromAddon(sub, src.AddonID, grants)...)
 			continue
 		}
 
 		index[key] = len(groups)
-		groups = append(groups, creditGrantGroup{
-			requests:  creditGrantRequestsFromAddon(sub, src.AddonID, grants),
-			startDate: src.StartDate,
-			endDate:   src.EndDate,
-			proration: proration,
+		groups = append(groups, dto.CreateSubscriptionGrantsRequest{
+			Subscription:         sub,
+			Grants:               creditGrantRequestsFromAddon(sub, src.AddonID, grants),
+			StartDate:            src.EffectiveDate,
+			EndDate:              src.EndDate,
+			FirstPeriodProration: proration,
 		})
 	}
 
@@ -195,7 +204,7 @@ func creditGrantGroupKey(src GrantSource, proration *dto.FirstPeriodProration) s
 			proration.Strategy, proration.Source)
 	}
 
-	return fmt.Sprintf("%v|%s|%s", src.StartDate.UTC(), end, prorationKey)
+	return fmt.Sprintf("%v|%s|%s", src.EffectiveDate.UTC(), end, prorationKey)
 }
 
 func creditGrantRequestsFromAddon(
@@ -226,30 +235,176 @@ func creditGrantRequestsFromAddon(
 
 // resolveCreditGrantCancellations collapses the removed sources into one cancellation per
 // effective date, since CancelFutureSubscriptionGrants already scopes by a slice of addons.
-func resolveCreditGrantCancellations(removed []GrantSource) []creditGrantCancellation {
-	cancellations := make([]creditGrantCancellation, 0, len(removed))
+func resolveCreditGrantCancellations(
+	sub *subscription.Subscription,
+	removed []GrantSource,
+) []dto.CancelFutureSubscriptionGrantsRequest {
+	cancellations := make([]dto.CancelFutureSubscriptionGrantsRequest, 0, len(removed))
 	index := make(map[time.Time]int, len(removed))
 
 	for _, src := range removed {
 		if src.AddonID == "" {
 			continue
 		}
-		if i, ok := index[src.StartDate]; ok {
-			cancellations[i].addonIDs = append(cancellations[i].addonIDs, src.AddonID)
+		if i, ok := index[src.EffectiveDate]; ok {
+			cancellations[i].AddonIDs = append(cancellations[i].AddonIDs, src.AddonID)
 			continue
 		}
 
-		index[src.StartDate] = len(cancellations)
-		cancellations = append(cancellations, creditGrantCancellation{
-			addonIDs:      []string{src.AddonID},
-			effectiveDate: src.StartDate,
+		index[src.EffectiveDate] = len(cancellations)
+		cancellations = append(cancellations, dto.CancelFutureSubscriptionGrantsRequest{
+			SubscriptionID: sub.ID,
+			AddonIDs:       []string{src.AddonID},
+			EffectiveDate:  lo.ToPtr(src.EffectiveDate),
 		})
 	}
 
 	return cancellations
 }
 
-// addonCreditGrantProration resolves the billing period containing startDate so a
+// resolveGrantECs is the flat set of grant configs the sources contribute this cycle.
+func (s *subscriptionGrantService) resolveGrantECs(
+	ctx context.Context,
+	sources []GrantSource,
+) ([]*entitlement.Entitlement, error) {
+	byAddon := make(map[string][]*entitlement.Entitlement, len(sources))
+	resolved := make([]*entitlement.Entitlement, 0, len(sources))
+
+	for _, src := range sources {
+		ecs, err := s.sourceGrantECs(ctx, byAddon, src)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, ecs...)
+	}
+
+	return resolved, nil
+}
+
+// sourceGrantECs reads one source's grant-carrying entitlement configs, memoised per addon.
+// A period-end source yields nothing: the tick re-derives its window at renewal, so it neither
+// cuts this cycle's windows nor feeds their quota.
+func (s *subscriptionGrantService) sourceGrantECs(
+	ctx context.Context,
+	byAddon map[string][]*entitlement.Entitlement,
+	src GrantSource,
+) ([]*entitlement.Entitlement, error) {
+	if src.AddonID == "" || src.ChangeType == types.ScheduleTypePeriodEnd {
+		return nil, nil
+	}
+
+	if ecs, read := byAddon[src.AddonID]; read {
+		return ecs, nil
+	}
+
+	ents, err := NewEntitlementService(s.ServiceParams).GetAddonEntitlements(ctx, src.AddonID)
+	if err != nil {
+		return nil, err
+	}
+
+	ecs := lo.Filter(dto.ToEntitlements(ents), func(ec *entitlement.Entitlement, _ int) bool {
+		return ec != nil && ec.HasGrantConfig()
+	})
+	byAddon[src.AddonID] = ecs
+
+	return ecs, nil
+}
+
+// resolveExistingGrantECs is the subscription's grant configs less the ones leaving in this
+// cycle: what decides slot ownership, the cold-start quota and survivorship.
+func (s *subscriptionGrantService) resolveExistingGrantECs(
+	ctx context.Context,
+	sub *subscription.Subscription,
+	removedECs []*entitlement.Entitlement,
+) (map[string][]*entitlement.Entitlement, error) {
+	byFeature, err := s.GetSubscriptionGrantECsByFeature(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	if len(removedECs) == 0 {
+		return byFeature, nil
+	}
+
+	removedIDs := lo.SliceToMap(removedECs, func(ec *entitlement.Entitlement) (string, bool) {
+		return ec.ID, true
+	})
+
+	surviving := make(map[string][]*entitlement.Entitlement, len(byFeature))
+	for featureID, ecs := range byFeature {
+		kept := lo.Filter(ecs, func(ec *entitlement.Entitlement, _ int) bool {
+			return ec != nil && !removedIDs[ec.ID]
+		})
+		if len(kept) > 0 {
+			surviving[featureID] = kept
+		}
+	}
+
+	return surviving, nil
+}
+
+// resolveIncomingGrants prorates each incoming source at its own date and behavior, then pools
+// the results into one segment per feature.
+func (s *subscriptionGrantService) resolveIncomingGrants(
+	ctx context.Context,
+	sub *subscription.Subscription,
+	incoming []GrantSource,
+	existingByFeature map[string][]*entitlement.Entitlement,
+) ([]*entitlement.Entitlement, []*entitlementgrant.EntitlementGrant, error) {
+	byAddon := make(map[string][]*entitlement.Entitlement, len(incoming))
+	ecs := make([]*entitlement.Entitlement, 0, len(incoming))
+
+	pooled := make(map[string]*entitlementgrant.EntitlementGrant, len(incoming))
+	features := make([]string, 0, len(incoming))
+
+	for _, src := range incoming {
+		srcECs, err := s.sourceGrantECs(ctx, byAddon, src)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(srcECs) == 0 {
+			continue
+		}
+		ecs = append(ecs, srcECs...)
+
+		grants, err := s.resolveGrantProration(
+			ctx, sub, srcECs, existingByFeature, src.EffectiveDate, src.Behavior, src.Origin)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		for _, grant := range grants {
+			featureID := grant.FeatureID()
+			prior, seen := pooled[featureID]
+			if !seen {
+				pooled[featureID] = grant
+				features = append(features, featureID)
+				continue
+			}
+
+			// The audit metadata stays the first source's: the pooled row has one coefficient
+			// only while the sources share a date, which is what the cycle filter guarantees.
+			pooled[featureID] = entitlementgrant.NewEntitlementGrantBuilder(prior).
+				WithQuota(prior.Quota.Add(grant.Quota)).
+				WithWindow(types.EarliestOf(prior.ValidFrom, grant.ValidFrom), prior.ValidTo).
+				Build()
+		}
+	}
+
+	return ecs, lo.Map(features, func(featureID string, _ int) *entitlementgrant.EntitlementGrant {
+		return pooled[featureID]
+	}), nil
+}
+
+// grantChangeTypeFor classifies a date against the cycle boundary.
+func grantChangeTypeFor(sub *subscription.Subscription, effectiveDate time.Time) types.ScheduleType {
+	if effectiveDate.Before(sub.CurrentPeriodEnd) {
+		return types.ScheduleTypeImmediate
+	}
+
+	return types.ScheduleTypePeriodEnd
+}
+
+// addonCreditGrantProration resolves the billing period containing effectiveDate so a
 // mid-cycle grant can be scaled to the part of that period it actually covers.
 // Returns nil when proration does not apply, in which case the grant keeps its full
 // credits and its natural anchoring.
@@ -259,7 +414,7 @@ func resolveCreditGrantCancellations(removed []GrantSource) []creditGrantCancell
 func (s *subscriptionGrantService) addonCreditGrantProration(
 	ctx context.Context,
 	sub *subscription.Subscription,
-	startDate time.Time,
+	effectiveDate time.Time,
 	behavior types.ProrationBehavior,
 ) *dto.FirstPeriodProration {
 	if behavior != types.ProrationBehaviorCreateProrations {
@@ -267,7 +422,7 @@ func (s *subscriptionGrantService) addonCreditGrantProration(
 	}
 
 	p, err := types.FindPeriodForDate(&types.FindPeriodForDateParams{
-		Target:           startDate,
+		Target:           effectiveDate,
 		KnownPeriodStart: sub.CurrentPeriodStart,
 		KnownPeriodEnd:   sub.CurrentPeriodEnd,
 		Anchor:           sub.BillingAnchor,
@@ -280,13 +435,13 @@ func (s *subscriptionGrantService) addonCreditGrantProration(
 		// period cannot be resolved. Grant in full rather than blocking the attach.
 		s.Logger.Info(ctx, "skipping credit grant proration; could not resolve billing period for addon start",
 			"subscription_id", sub.ID,
-			"start_date", startDate,
+			"effective_date", effectiveDate,
 			"current_period_start", sub.CurrentPeriodStart,
 			"error", err.Error())
 		return nil
 	}
 
-	if !startDate.After(p.Start) {
+	if !effectiveDate.After(p.Start) {
 		return nil
 	}
 
@@ -299,7 +454,7 @@ func (s *subscriptionGrantService) addonCreditGrantProration(
 	return &dto.FirstPeriodProration{
 		PeriodStart:   p.Start,
 		PeriodEnd:     p.End,
-		ProrationDate: startDate,
+		ProrationDate: effectiveDate,
 		Strategy:      types.StrategySecondBased,
 		Source:        grantProrationSourceAddonAttach.String(),
 	}

@@ -29,7 +29,7 @@ const (
 
 func (s grantProrationSource) String() string { return string(s) }
 
-func (s *subscriptionService) resolveGrantProration(
+func (s *subscriptionGrantService) resolveGrantProration(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	incomingECs []*entitlement.Entitlement,
@@ -265,7 +265,7 @@ func (s *subscriptionService) handleGrantsForRemovedECs(
 		return err
 	}
 
-	ecsByFeature, err := s.GetSubscriptionGrantECsByFeature(ctx, sub)
+	ecsByFeature, err := newSubscriptionGrantService(s.ServiceParams).GetSubscriptionGrantECsByFeature(ctx, sub)
 	if err != nil {
 		return err
 	}
@@ -368,11 +368,11 @@ func (s *subscriptionService) handleGrantsForRemovedECs(
 // GetSubscriptionGrantECsByFeature is the subscription's grant ECs grouped by feature —
 // the set that decides slot ownership and the cold-start quota. Called before the incoming
 // ECs are persisted, so they are absent from the result.
-func (s *subscriptionService) GetSubscriptionGrantECsByFeature(
+func (s *subscriptionGrantService) GetSubscriptionGrantECsByFeature(
 	ctx context.Context,
 	sub *subscription.Subscription,
 ) (map[string][]*entitlement.Entitlement, error) {
-	ents, err := s.GetSubscriptionEntitlementsForSubscription(ctx, sub)
+	ents, err := NewSubscriptionService(s.ServiceParams).GetSubscriptionEntitlementsForSubscription(ctx, sub)
 	if err != nil {
 		return nil, err
 	}

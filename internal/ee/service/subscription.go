@@ -5069,37 +5069,22 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 	lineItems := params.getLineItems()
 	lineItemBucketCfgs := params.getBucketCfgs()
 	priceMap := params.getPriceMap()
-	addonRequestedStart := params.getRequestedStart()
 	existing := params.isReplayAttach()
 
 	grantService := newSubscriptionGrantService(s.ServiceParams)
 	grantCfg, err := grantService.Resolve(ctx, GrantChangeRequest{
 		Sub: sub,
 		Incoming: []GrantSource{{
-			StartDate: addonRequestedStart,
-			EndDate:   addonAssociation.EndDate,
-			Behavior:  req.ProrationBehavior,
-			Origin:    grantProrationSourceAddonAttach,
-			AddonID:   req.AddonID,
+			// The clamped date, not the requested one: a grant anchored before the line items
+			// start covers a window the addon is not live for.
+			ChangeType:    grantChangeTypeFor(sub, params.getEffectiveDate()),
+			EffectiveDate: params.getEffectiveDate(),
+			EndDate:       addonAssociation.EndDate,
+			Behavior:      req.ProrationBehavior,
+			Origin:        grantProrationSourceAddonAttach,
+			AddonID:       req.AddonID,
 		}},
 	})
-	if err != nil {
-		return err
-	}
-
-	addonEnts, err := NewEntitlementService(s.ServiceParams).GetAddonEntitlements(ctx, req.AddonID)
-	if err != nil {
-		return err
-	}
-	addonGrantECs := dto.ToEntitlements(addonEnts)
-
-	existingGrantECs, err := s.GetSubscriptionGrantECsByFeature(ctx, sub)
-	if err != nil {
-		return err
-	}
-
-	proratedGrants, err := s.resolveGrantProration(
-		ctx, sub, addonGrantECs, existingGrantECs, params.getEffectiveDate(), req.ProrationBehavior, grantProrationSourceAddonAttach)
 	if err != nil {
 		return err
 	}
@@ -5144,7 +5129,8 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 		// Close this cycle's grant windows and open their prorated successors. The
 		// evaluator opens grants lazily from a usage-driven tick with no request in scope,
 		// so the attach has to write the segment itself for the proration to exist at all.
-		if err := s.materialiseEntitlementGrants(ctx, sub, proratedGrants, addonGrantECs, existingGrantECs, params.getEffectiveDate()); err != nil {
+		if err := s.materialiseEntitlementGrants(ctx, sub, grantCfg.entitlementGrantsToAdd,
+			grantCfg.incomingECs, grantCfg.existingECsByFeature, params.getEffectiveDate()); err != nil {
 			return err
 		}
 

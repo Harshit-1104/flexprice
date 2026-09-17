@@ -627,9 +627,10 @@ func (s *subscriptionService) persistAddonDetach(ctx context.Context, params *ad
 	grantCfg, err := grantService.Resolve(ctx, GrantChangeRequest{
 		Sub: params.getSubscription(),
 		Removed: []GrantSource{{
-			StartDate: params.getEffectiveDate(),
-			Origin:    grantProrationSourceAddonDetach,
-			AddonID:   association.AddonID,
+			ChangeType:    grantChangeTypeFor(params.getSubscription(), params.getEffectiveDate()),
+			EffectiveDate: params.getEffectiveDate(),
+			Origin:        grantProrationSourceAddonDetach,
+			AddonID:       association.AddonID,
 		}},
 	})
 	if err != nil {
