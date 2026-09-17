@@ -39,6 +39,17 @@ type AddonChangeRequest struct {
 	Removes      []*dto.RemoveAddonRequest
 }
 
+// NewAddonChangeRequest maps a batch modify payload onto the spine's request.
+func NewAddonChangeRequest(sub *subscription.Subscription, params *dto.SubModifyAddonsParams) AddonChangeRequest {
+	return AddonChangeRequest{
+		Subscription: sub,
+		Adds: lo.Map(params.Adds, func(add *dto.AddAddonToSubscriptionRequest, _ int) AddonAdd {
+			return AddonAdd{Request: add}
+		}),
+		Removes: params.Removes,
+	}
+}
+
 func (r AddonChangeRequest) Validate() error {
 	if r.Subscription == nil {
 		return ierr.NewError("subscription is required for an addon change").
@@ -122,6 +133,17 @@ func (c *addonChangeConfig) getIdempotencyKey() string {
 		return ""
 	}
 	return c.idemKey
+}
+
+// hasPriceOverrides reports whether any attach mints subscription-scoped prices during Persist.
+func (c *addonChangeConfig) hasPriceOverrides() bool {
+	for _, attach := range c.getAttaches() {
+		if len(attach.getRequest().OverrideLineItems) > 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (c *addonChangeConfig) getReason() string {
@@ -372,6 +394,14 @@ func (s *addonChangeService) Persist(ctx context.Context, config *addonChangeCon
 
 	if err := s.persistAttaches(ctx, config); err != nil {
 		return err
+	}
+
+	// Overrides repoint line items at prices that did not exist when Resolve quoted, so the
+	// quote has to be retaken against what will actually be billed.
+	if config.hasPriceOverrides() {
+		if err := s.quote(ctx, config); err != nil {
+			return err
+		}
 	}
 
 	return newSubscriptionGrantService(s.ServiceParams).Apply(ctx, config.getGrants())
