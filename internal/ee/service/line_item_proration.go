@@ -145,6 +145,13 @@ type SettleProrationResult struct {
 	Draft   *dto.InvoiceResponse // set only for SettleModeDraft
 }
 
+func (r *SettleProrationResult) GetChanged() []dto.ChangedInvoice {
+	if r == nil {
+		return nil
+	}
+	return r.Changed
+}
+
 type LineItemProrationService interface {
 	Compute(ctx context.Context, req LineItemProrationRequest) (*LineItemProrationSummary, error)
 

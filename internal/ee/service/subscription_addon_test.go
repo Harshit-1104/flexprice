@@ -600,11 +600,14 @@ func (s *SubscriptionServiceSuite) TestAddAddon_CheckoutNetCharge_PersistsOnlyPe
 		ProrationBehavior: types.ProrationBehaviorCreateProrations,
 	}
 
-	plan, err := subService.createAddonAttachParams(ctx, sub, req, nil)
+	config, err := NewAddonChangeService(subService.ServiceParams).Resolve(ctx, AddonChangeRequest{
+		Subscription: sub,
+		Adds:         []AddonAdd{{Request: req}},
+	})
 	s.Require().NoError(err)
 
-	summary, err := subService.calculateAddonProration(ctx, plan)
-	s.Require().NoError(err)
+	plan := config.getAttaches()[0]
+	summary := config.getQuote()
 	s.True(summary.TotalChargeAmount.GreaterThan(decimal.Zero),
 		"a mid-period fixed ADVANCE addon must produce a charge to gate on")
 
@@ -861,11 +864,14 @@ func (s *SubscriptionServiceSuite) seedPayFirstAddonCheckout(
 		ProrationBehavior: types.ProrationBehaviorCreateProrations,
 	}
 
-	attach, err := subService.createAddonAttachParams(ctx, sub, req, nil)
+	config, err := NewAddonChangeService(subService.ServiceParams).Resolve(ctx, AddonChangeRequest{
+		Subscription: sub,
+		Adds:         []AddonAdd{{Request: req}},
+	})
 	s.Require().NoError(err)
 
-	summary, err := subService.calculateAddonProration(ctx, attach)
-	s.Require().NoError(err)
+	attach := config.getAttaches()[0]
+	summary := config.getQuote()
 	s.Require().True(summary.TotalChargeAmount.GreaterThan(decimal.Zero))
 
 	pending := attach.getAssociation()
