@@ -372,11 +372,11 @@ func (s *subscriptionService) createSubscription(ctx context.Context, req dto.Cr
 	}
 
 	// Prepare credit grants
+	creditGrantService := NewCreditGrantService(s.ServiceParams)
 	var creditGrantRequests []dto.CreateCreditGrantRequest
 	if req.CreditGrants != nil {
 		creditGrantRequests = req.CreditGrants
 	} else {
-		creditGrantService := NewCreditGrantService(s.ServiceParams)
 		planCreditGrants, err := creditGrantService.GetCreditGrantsByPlan(ctx, plan.ID)
 		if err != nil {
 			return nil, err
@@ -389,7 +389,16 @@ func (s *subscriptionService) createSubscription(ctx context.Context, req dto.Cr
 			}
 		}
 	}
-	if err = s.handleCreditGrants(ctx, sub, creditGrantRequests); err != nil {
+	// Plan/subscription grants anchor at the subscription start (or trial end).
+	creditGrantStart := sub.StartDate
+	if sub.TrialEnd != nil {
+		creditGrantStart = lo.FromPtr(sub.TrialEnd)
+	}
+	if err = creditGrantService.CreateSubscriptionGrants(ctx, dto.CreateSubscriptionGrantsRequest{
+		Subscription: sub,
+		Grants:       creditGrantRequests,
+		StartDate:    creditGrantStart,
+	}); err != nil {
 		return nil, err
 	}
 	if err = s.handleTaxRateLinking(ctx, sub, req); err != nil {
@@ -1530,191 +1539,6 @@ func (s *subscriptionService) handleEntitlementProration(
 		"subscription_id", sub.ID,
 		"prorated_count", len(prorationResult.ProratedLimits),
 		"coefficient", prorationResult.ProrationCoefficient.String())
-
-	return nil
-}
-
-// handleCreditGrants handles creating and applying credit grants for a subscription
-func (s *subscriptionService) handleCreditGrants(
-	ctx context.Context,
-	subscription *subscription.Subscription,
-	creditGrantRequests []dto.CreateCreditGrantRequest,
-) error {
-	// Plan/subscription grants anchor at the subscription start (or trial end).
-	startDate := subscription.StartDate
-	if subscription.TrialEnd != nil {
-		startDate = lo.FromPtr(subscription.TrialEnd)
-	}
-	return s.handleCreditGrantsWithStart(ctx, subscription, creditGrantRequests, startDate, nil, nil)
-}
-
-// addonCreditGrantProration resolves the billing period containing startDate so a
-// mid-cycle grant can be scaled to the part of that period it actually covers.
-// Returns nil when proration does not apply, in which case the grant keeps its full
-// credits and its natural anchoring.
-//
-// Never returns an error: proration is an enhancement to the attach, so an
-// unresolvable period downgrades to today's behaviour instead of rejecting the addon.
-func (s *subscriptionService) addonCreditGrantProration(
-	ctx context.Context,
-	sub *subscription.Subscription,
-	startDate time.Time,
-	behavior types.ProrationBehavior,
-) *dto.FirstPeriodProration {
-	if behavior != types.ProrationBehaviorCreateProrations {
-		return nil
-	}
-
-	p, err := types.FindPeriodForDate(&types.FindPeriodForDateParams{
-		Target:           startDate,
-		KnownPeriodStart: sub.CurrentPeriodStart,
-		KnownPeriodEnd:   sub.CurrentPeriodEnd,
-		Anchor:           sub.BillingAnchor,
-		PeriodCount:      sub.BillingPeriodCount,
-		BillingPeriod:    sub.BillingPeriod,
-		Timezone:         sub.Timezone,
-	})
-	if err != nil {
-		// FindPeriodForDate only walks forward, so a start date in an already-closed
-		// period cannot be resolved. Grant in full rather than blocking the attach.
-		s.Logger.Info(ctx, "skipping credit grant proration; could not resolve billing period for addon start",
-			"subscription_id", sub.ID,
-			"start_date", startDate,
-			"current_period_start", sub.CurrentPeriodStart,
-			"error", err.Error())
-		return nil
-	}
-
-	if !startDate.After(p.Start) {
-		return nil
-	}
-
-	// A grant anchored past the subscription end fails CreateCreditGrant validation,
-	// and the grant would be capped to that end anyway.
-	if sub.EndDate != nil && p.End.After(lo.FromPtr(sub.EndDate)) {
-		return nil
-	}
-
-	return &dto.FirstPeriodProration{
-		PeriodStart:   p.Start,
-		PeriodEnd:     p.End,
-		ProrationDate: startDate,
-		Strategy:      types.StrategySecondBased,
-		Source:        grantProrationSourceAddonAttach.String(),
-	}
-}
-
-// handleCreditGrantsWithStart materializes the given credit grant requests onto the
-// subscription, anchoring the grant chain at startDate. Callers that attach grants
-// mid-cycle (e.g. addon application) pass the attach date so the first grant applies
-// immediately and recurs from there, instead of the subscription start.
-func (s *subscriptionService) handleCreditGrantsWithStart(
-	ctx context.Context,
-	subscription *subscription.Subscription,
-	creditGrantRequests []dto.CreateCreditGrantRequest,
-	startDate time.Time,
-	endDateOverride *time.Time,
-	prorationCfg *dto.FirstPeriodProration,
-) error {
-	if len(creditGrantRequests) == 0 {
-		return nil
-	}
-
-	creditGrantService := NewCreditGrantService(s.ServiceParams)
-
-	s.Logger.Info(ctx, "processing credit grants for subscription",
-		"subscription_id", subscription.ID,
-		"credit_grants_count", len(creditGrantRequests))
-
-	// Validate that all credit grants have the same conversion rates
-	if len(creditGrantRequests) > 1 {
-		conversionRate := creditGrantRequests[0].ConversionRate
-		topupConversionRate := creditGrantRequests[0].TopupConversionRate
-
-		validationError := ierr.NewError("all credit grants must have the same conversion_rate and topup_conversion_rate").
-			WithHint("All credit grants must have the same conversion rates").
-			Mark(ierr.ErrValidation)
-
-		for i := 1; i < len(creditGrantRequests); i++ {
-			grantReq := creditGrantRequests[i]
-
-			// If first is nil, all must be nil. If first is not nil, all must match that value.
-			if conversionRate == nil {
-				if grantReq.ConversionRate != nil {
-					return validationError
-				}
-			} else {
-				if grantReq.ConversionRate == nil || !conversionRate.Equal(lo.FromPtr(grantReq.ConversionRate)) {
-					return validationError
-				}
-			}
-
-			if topupConversionRate == nil {
-				if grantReq.TopupConversionRate != nil {
-					return validationError
-				}
-			} else {
-				if grantReq.TopupConversionRate == nil || !topupConversionRate.Equal(lo.FromPtr(grantReq.TopupConversionRate)) {
-					return validationError
-				}
-			}
-		}
-	}
-
-	// Cap the grant end at the addon's end date when materializing addon-sourced
-	// grants: min(addonEnd, subscriptionEnd). Plan/subscription grants pass a nil
-	// override and keep the subscription end. This stops recurring grants from a
-	// time-bounded (onetime) addon from continuing to apply after the addon ends.
-	effectiveEnd := subscription.EndDate
-	if endDateOverride != nil && (effectiveEnd == nil || endDateOverride.Before(lo.FromPtr(effectiveEnd))) {
-		effectiveEnd = endDateOverride
-	}
-
-	// Create and apply credit grants anchored at startDate
-	for _, grantReq := range creditGrantRequests {
-		// Ensure subscription ID is set and scope is SUBSCRIPTION
-		grantReq.SubscriptionID = lo.ToPtr(subscription.ID)
-		grantReq.Scope = types.CreditGrantScopeSubscription
-		grantReq.StartDate = lo.ToPtr(startDate)
-		grantReq.EndDate = effectiveEnd
-
-		// Use subscription start date as the anchor for the credit grant chain
-		grantReq.CreditGrantAnchor = lo.ToPtr(startDate)
-
-		// Prorating a mid-cycle grant only makes sense for a recurring allowance that
-		// shares the subscription's billing rhythm; a onetime grant is a fixed lump,
-		// and a monthly grant on an annual subscription should keep recurring monthly
-		// rather than stretch to the billing period.
-		grantPeriod := types.BillingPeriod("")
-		if grantReq.Period != nil {
-			period, err := types.GetBillingPeriodFromCreditGrantPeriod(lo.FromPtr(grantReq.Period))
-			if err != nil {
-				s.Logger.Error(ctx, "failed to get billing period from credit grant period",
-					"subscription_id", subscription.ID,
-					"credit_grant_period", grantReq.Period,
-					"error", err)
-			}
-			grantPeriod = period
-		}
-
-		if prorationCfg != nil &&
-			grantReq.Cadence == types.CreditGrantCadenceRecurring &&
-			grantPeriod == subscription.BillingPeriod {
-			// Anchor on the subscription's period boundary rather than the attach date, so
-			// every period after the short first one lands on an invoicing boundary instead
-			// of drifting. Chaining stays correct because createNextPeriodApplication feeds
-			// each period end back in as the next period start, matching this anchor.
-			grantReq.CreditGrantAnchor = lo.ToPtr(prorationCfg.PeriodEnd)
-			grantReq.FirstPeriodProration = prorationCfg
-		}
-
-		// Create credit grant: this now triggers initializeCreditGrantWorkflow
-		// which handles creation, anchor calculation, and eager application
-		_, err := creditGrantService.CreateCreditGrant(ctx, grantReq)
-		if err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
@@ -5248,7 +5072,21 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 	addonRequestedStart := params.getRequestedStart()
 	existing := params.isReplayAttach()
 
-	creditGrantProration := s.addonCreditGrantProration(ctx, sub, addonRequestedStart, req.ProrationBehavior)
+	grantService := newSubscriptionGrantService(s.ServiceParams)
+	grantCfg, err := grantService.Resolve(ctx, GrantChangeRequest{
+		Sub: sub,
+		Incoming: []GrantSource{{
+			StartDate: addonRequestedStart,
+			EndDate:   addonAssociation.EndDate,
+			Behavior:  req.ProrationBehavior,
+			Origin:    grantProrationSourceAddonAttach,
+			AddonID:   req.AddonID,
+		}},
+	})
+	if err != nil {
+		return err
+	}
+
 	addonEnts, err := NewEntitlementService(s.ServiceParams).GetAddonEntitlements(ctx, req.AddonID)
 	if err != nil {
 		return err
@@ -5299,7 +5137,7 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 		// Materialize the addon's credit grants (if any) onto the subscription,
 		// anchored at the addon attach date so mid-cycle grants apply immediately.
 		// Kept in-transaction so grant application is atomic with the addon attach.
-		if err := s.materializeAddonCreditGrants(ctx, sub, req.AddonID, addonRequestedStart, addonAssociation.EndDate, creditGrantProration); err != nil {
+		if err := grantService.Apply(ctx, grantCfg); err != nil {
 			return err
 		}
 
@@ -5314,56 +5152,6 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 	})
 
 	return err
-}
-
-// materializeAddonCreditGrants clones the addon's ADDON-scoped credit grant templates
-// into SUBSCRIPTION-scoped grants on the subscription and applies them, anchored at
-// startDate (the addon attach date). AddonID is carried through as provenance so
-// removal can target these grants specifically. No-op when the addon has no grants.
-func (s *subscriptionService) materializeAddonCreditGrants(
-	ctx context.Context,
-	sub *subscription.Subscription,
-	addonID string,
-	startDate time.Time,
-	addonEndDate *time.Time,
-	prorationCfg *dto.FirstPeriodProration,
-) error {
-	creditGrantService := NewCreditGrantService(s.ServiceParams)
-	addonGrants, err := creditGrantService.GetCreditGrantsByAddon(ctx, addonID)
-	if err != nil {
-		return err
-	}
-	if len(addonGrants.Items) == 0 {
-		return nil
-	}
-
-	s.Logger.Info(ctx, "addon has credit grants",
-		"addon_id", addonID,
-		"subscription_id", sub.ID,
-		"credit_grants_count", len(addonGrants.Items))
-
-	requests := make([]dto.CreateCreditGrantRequest, 0, len(addonGrants.Items))
-	for _, cg := range addonGrants.Items {
-		requests = append(requests, dto.CreateCreditGrantRequest{
-			Name:                   cg.Name,
-			Scope:                  types.CreditGrantScopeSubscription,
-			Credits:                cg.Credits,
-			Cadence:                cg.Cadence,
-			ExpirationType:         cg.ExpirationType,
-			Priority:               cg.Priority,
-			SubscriptionID:         lo.ToPtr(sub.ID),
-			AddonID:                lo.ToPtr(addonID), // provenance for targeted removal
-			Period:                 cg.Period,
-			ExpirationDuration:     cg.ExpirationDuration,
-			ExpirationDurationUnit: cg.ExpirationDurationUnit,
-			Metadata:               cg.Metadata,
-			PeriodCount:            cg.PeriodCount,
-			ConversionRate:         cg.ConversionRate,
-			TopupConversionRate:    cg.TopupConversionRate,
-		})
-	}
-
-	return s.handleCreditGrantsWithStart(ctx, sub, requests, startDate, addonEndDate, prorationCfg)
 }
 
 // validateEntitlementCompatibility checks if addon entitlements are compatible with existing subscription entitlements
