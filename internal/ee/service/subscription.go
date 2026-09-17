@@ -5126,14 +5126,6 @@ func (s *subscriptionService) persistAddonAttach(ctx context.Context, params *ad
 			return err
 		}
 
-		// Close this cycle's grant windows and open their prorated successors. The
-		// evaluator opens grants lazily from a usage-driven tick with no request in scope,
-		// so the attach has to write the segment itself for the proration to exist at all.
-		if err := s.materialiseEntitlementGrants(ctx, sub, grantCfg.entitlementGrantsToAdd,
-			grantCfg.incomingECs, grantCfg.existingECsByFeature, params.getEffectiveDate()); err != nil {
-			return err
-		}
-
 		return nil
 	})
 

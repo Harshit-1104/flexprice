@@ -65,8 +65,11 @@ type GrantChangeConfig struct {
 	entitlementGrantsToAdd []*entitlementgrant.EntitlementGrant
 	entitlementsToRemove   []*entitlement.Entitlement
 
-	incomingECs          []*entitlement.Entitlement
-	existingECsByFeature map[string][]*entitlement.Entitlement
+	incomingECs           []*entitlement.Entitlement
+	survivingECsByFeature map[string][]*entitlement.Entitlement
+
+	// entitlementChangeAt is the instant every window of this change is cut at.
+	entitlementChangeAt time.Time
 }
 
 type subscriptionGrantService struct {
@@ -101,7 +104,7 @@ func (s *subscriptionGrantService) Resolve(ctx context.Context, req GrantChangeR
 		return nil, err
 	}
 
-	if cfg.existingECsByFeature, err = s.resolveExistingGrantECs(ctx, req.Sub, cfg.entitlementsToRemove); err != nil {
+	if cfg.survivingECsByFeature, err = s.resolveSurvivingGrantECs(ctx, req.Sub, cfg.entitlementsToRemove); err != nil {
 		return nil, err
 	}
 
@@ -109,11 +112,13 @@ func (s *subscriptionGrantService) Resolve(ctx context.Context, req GrantChangeR
 		ctx,
 		req.Sub,
 		req.Incoming,
-		cfg.existingECsByFeature,
+		cfg.survivingECsByFeature,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	cfg.entitlementChangeAt = entitlementChangeAt(req)
 
 	return cfg, nil
 }
@@ -136,7 +141,20 @@ func (s *subscriptionGrantService) Apply(ctx context.Context, cfg *GrantChangeCo
 		}
 	}
 
-	return nil
+	return s.applyEntitlementGrantChange(ctx, cfg)
+}
+
+// entitlementChangeAt is the instant the change cuts this cycle's windows: never in the past,
+// since a window already measured cannot be re-cut.
+func entitlementChangeAt(req GrantChangeRequest) time.Time {
+	at := time.Now().UTC()
+	for _, src := range append(append([]GrantSource{}, req.Incoming...), req.Removed...) {
+		if src.ChangeType != types.ScheduleTypePeriodEnd {
+			at = types.LatestOf(at, src.EffectiveDate)
+		}
+	}
+
+	return at
 }
 
 // resolveCreditGrantToCreate clones each incoming addon's ADDON-scoped credit grant templates
@@ -310,9 +328,9 @@ func (s *subscriptionGrantService) sourceGrantECs(
 	return ecs, nil
 }
 
-// resolveExistingGrantECs is the subscription's grant configs less the ones leaving in this
+// resolveSurvivingGrantECs is the subscription's grant configs less the ones leaving in this
 // cycle: what decides slot ownership, the cold-start quota and survivorship.
-func (s *subscriptionGrantService) resolveExistingGrantECs(
+func (s *subscriptionGrantService) resolveSurvivingGrantECs(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	removedECs []*entitlement.Entitlement,
@@ -348,7 +366,7 @@ func (s *subscriptionGrantService) resolveIncomingGrants(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	incoming []GrantSource,
-	existingByFeature map[string][]*entitlement.Entitlement,
+	survivingByFeature map[string][]*entitlement.Entitlement,
 ) ([]*entitlement.Entitlement, []*entitlementgrant.EntitlementGrant, error) {
 	byAddon := make(map[string][]*entitlement.Entitlement, len(incoming))
 	ecs := make([]*entitlement.Entitlement, 0, len(incoming))
@@ -367,7 +385,7 @@ func (s *subscriptionGrantService) resolveIncomingGrants(
 		ecs = append(ecs, srcECs...)
 
 		grants, err := s.resolveGrantProration(
-			ctx, sub, srcECs, existingByFeature, src.EffectiveDate, src.Behavior, src.Origin)
+			ctx, sub, srcECs, survivingByFeature, src.EffectiveDate, src.Behavior, src.Origin)
 		if err != nil {
 			return nil, nil, err
 		}
