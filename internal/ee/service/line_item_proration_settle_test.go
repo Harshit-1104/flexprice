@@ -63,12 +63,13 @@ func (s *LineItemProrationServiceSuite) applyViaSettle(
 		"Subscription update", key, SettleModeIssue,
 	)
 	settleReq.Reason = req.Reason
-	settleReq.AttemptPayment = true
 
 	settled, err := s.svc.Settle(ctx, settleReq)
 	if err != nil {
 		return nil, err
 	}
+
+	attemptProrationPayments(ctx, s.params, settled.GetChanged())
 
 	return settled.Changed, nil
 }

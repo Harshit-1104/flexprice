@@ -1447,8 +1447,13 @@ func (s *subscriptionService) settleLineItemProration(
 		"Subscription update", idempotencyKey, SettleModeIssue,
 	)
 	settleReq.Reason = req.Reason
-	settleReq.AttemptPayment = true
 
-	_, err = prorationSvc.Settle(ctx, settleReq)
-	return err
+	settled, err := prorationSvc.Settle(ctx, settleReq)
+	if err != nil {
+		return err
+	}
+
+	attemptProrationPayments(ctx, s.ServiceParams, settled.GetChanged())
+
+	return nil
 }
