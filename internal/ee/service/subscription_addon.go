@@ -627,9 +627,10 @@ func (s *subscriptionService) persistAddonDetach(ctx context.Context, params *ad
 	grantCfg, err := grantService.Resolve(ctx, GrantChangeRequest{
 		Sub: params.getSubscription(),
 		Removed: []GrantSource{{
-			StartDate: params.getEffectiveDate(),
-			Origin:    grantProrationSourceAddonDetach,
-			AddonID:   association.AddonID,
+			ChangeType:    grantChangeTypeFor(params.getSubscription(), params.getEffectiveDate()),
+			EffectiveDate: params.getEffectiveDate(),
+			Origin:        grantProrationSourceAddonDetach,
+			AddonID:       association.AddonID,
 		}},
 	})
 	if err != nil {
@@ -646,17 +647,6 @@ func (s *subscriptionService) persistAddonDetach(ctx context.Context, params *ad
 			if _, err := s.deleteSubscriptionLineItem(ctx, lineItem.ID, deleteReq); err != nil {
 				return err
 			}
-		}
-
-		// End the entitlement grant windows this addon owns on its own slots. Pooled
-		// (additive) windows survive the detach — see closeGrantsForRemovedECs.
-		addonEnts, err := NewEntitlementService(s.ServiceParams).GetAddonEntitlements(ctx, association.AddonID)
-		if err != nil {
-			return err
-		}
-		addonECs := dto.ToEntitlements(addonEnts)
-		if err := s.handleGrantsForRemovedECs(ctx, params.getSubscription(), addonECs, params.getEffectiveDate(), grantProrationSourceAddonDetach); err != nil {
-			return err
 		}
 
 		// Cancel future applications of credit grants materialized from THIS addon only
