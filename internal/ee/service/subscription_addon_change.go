@@ -12,6 +12,7 @@ import (
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/samber/lo"
+	"github.com/shopspring/decimal"
 )
 
 type AddonChangeService interface {
@@ -23,7 +24,11 @@ type AddonChangeService interface {
 
 	Persist(ctx context.Context, config *addonChangeConfig) error
 
+	PersistPending(ctx context.Context, config *addonChangeConfig) error
+
 	Settle(ctx context.Context, config *addonChangeConfig, mode SettleMode) (*SettleProrationResult, error)
+
+	ExecutePayFirst(ctx context.Context, req AddonChangeRequest, checkout *dto.CheckoutParams) (*ExecutePayFirstResponse, error)
 }
 
 // AddonAdd is one attach in a batch. Existing is set only on a checkout-completion replay,
@@ -70,6 +75,35 @@ func (r AddonChangeRequest) Validate() error {
 	}
 
 	return nil
+}
+
+// ExecutePayFirstResponse is a change waiting on payment: the plan that will apply once the
+// customer pays, the session collecting it, and what Settle raised — a draft holding the net.
+type ExecutePayFirstResponse struct {
+	config  *addonChangeConfig
+	session *dto.CheckoutSessionResponse
+	settled *SettleProrationResult
+}
+
+func (r *ExecutePayFirstResponse) getConfig() *addonChangeConfig {
+	if r == nil {
+		return nil
+	}
+	return r.config
+}
+
+func (r *ExecutePayFirstResponse) getSession() *dto.CheckoutSessionResponse {
+	if r == nil {
+		return nil
+	}
+	return r.session
+}
+
+func (r *ExecutePayFirstResponse) getSettled() *SettleProrationResult {
+	if r == nil {
+		return nil
+	}
+	return r.settled
 }
 
 type addonChangeConfig struct {
@@ -202,8 +236,14 @@ func (s *addonChangeService) Resolve(ctx context.Context, req AddonChangeRequest
 	sub := req.Subscription
 	config := &addonChangeConfig{sub: sub}
 
+	// One `now` for the whole change: resolving per entry would give each immediate entry a
+	// different timestamp and split one proration pass into several.
+	now := time.Now().UTC()
+
 	for _, remove := range req.Removes {
-		params, err := s.sub.createAddonDetachParams(ctx, sub, remove)
+		removeReq := resolveRemoveChangeAt(remove, now, sub.CurrentPeriodEnd)
+
+		params, err := s.sub.createAddonDetachParams(ctx, sub, &removeReq)
 		if err != nil {
 			return nil, err
 		}
@@ -218,7 +258,7 @@ func (s *addonChangeService) Resolve(ctx context.Context, req AddonChangeRequest
 	// batch is checked as the shape it will leave behind rather than one addon at a time.
 	originalLineItems := sub.LineItems
 	for _, add := range req.Adds {
-		addReq := *add.Request
+		addReq := resolveAttachChangeAt(add.Request, now, sub.CurrentPeriodEnd)
 		addReq.SkipEntityValidation = true
 
 		params, err := s.sub.createAddonAttachParams(ctx, sub, &addReq, add.Existing)
@@ -243,6 +283,40 @@ func (s *addonChangeService) Resolve(ctx context.Context, req AddonChangeRequest
 	}
 
 	return config, nil
+}
+
+func resolveAttachChangeAt(
+	req *dto.AddAddonToSubscriptionRequest,
+	now, periodEnd time.Time,
+) dto.AddAddonToSubscriptionRequest {
+	resolved := *req
+	if resolved.ChangeAt != nil {
+		resolved.StartDate = lo.ToPtr(changeAtDate(*resolved.ChangeAt, now, periodEnd))
+		resolved.ChangeAt = nil
+	}
+
+	return resolved
+}
+
+func resolveRemoveChangeAt(
+	req *dto.RemoveAddonRequest,
+	now, periodEnd time.Time,
+) dto.RemoveAddonRequest {
+	resolved := *req
+	if resolved.ChangeAt != nil {
+		resolved.EffectiveDate = lo.ToPtr(changeAtDate(*resolved.ChangeAt, now, periodEnd))
+		resolved.ChangeAt = nil
+	}
+
+	return resolved
+}
+
+func changeAtDate(changeAt types.ScheduleType, now, periodEnd time.Time) time.Time {
+	if changeAt == types.ScheduleTypePeriodEnd {
+		return periodEnd
+	}
+
+	return now
 }
 
 func (s *addonChangeService) grantChangeRequest(config *addonChangeConfig) GrantChangeRequest {
@@ -407,6 +481,25 @@ func (s *addonChangeService) Persist(ctx context.Context, config *addonChangeCon
 	return newSubscriptionGrantService(s.ServiceParams).Apply(ctx, config.getGrants())
 }
 
+// PersistPending writes the batch's attaches as pending associations and nothing else — no line
+// items, no grants, and no removals — so the subscription keeps billing exactly as it did until
+// payment lands.
+func (s *addonChangeService) PersistPending(ctx context.Context, config *addonChangeConfig) error {
+	if config == nil {
+		return ierr.NewError("addon change config is required").
+			Mark(ierr.ErrValidation)
+	}
+
+	associations := make([]*addonassociation.AddonAssociation, 0, len(config.getAttaches()))
+	for _, attach := range config.getAttaches() {
+		association := attach.getAssociation()
+		association.AddonStatus = types.AddonStatusPending
+		associations = append(associations, association)
+	}
+
+	return s.AddonAssociationRepo.CreateBulk(ctx, associations)
+}
+
 func (s *addonChangeService) persistRemovals(ctx context.Context, config *addonChangeConfig) error {
 	// Each removal carries its own date and reason, so cancellation batches by both.
 	type cancellation struct {
@@ -564,6 +657,205 @@ func (s *addonChangeService) Execute(
 	attemptProrationPayments(ctx, s.ServiceParams, settled.GetChanged())
 
 	return config, settled, nil
+}
+
+// ExecutePayFirst writes the change's pending half and locks its net on a draft invoice, then
+// opens a checkout for it. Returns a nil config when the net is not a charge — there is nothing
+// to collect, so the caller applies the change immediately instead.
+//
+// Steps 1-4 run under the subscription row lock; the provider call cannot, because it is
+// outbound HTTP. That is safe because everything committed before it is inert: pending
+// associations are invisible to billing and the draft is not finalized.
+func (s *addonChangeService) ExecutePayFirst(
+	ctx context.Context,
+	req AddonChangeRequest,
+	checkout *dto.CheckoutParams,
+) (*ExecutePayFirstResponse, error) {
+	if err := req.Validate(); err != nil {
+		return nil, err
+	}
+	if err := validateAddonChangeCheckout(req, checkout); err != nil {
+		return nil, err
+	}
+
+	var (
+		config         *addonChangeConfig
+		settled        *SettleProrationResult
+		checkoutParams *types.AddAddonParams
+	)
+
+	subscriptionID := req.Subscription.ID
+	err := s.DB.WithTx(ctx, func(txCtx context.Context) error {
+		locked, err := s.sub.loadSubscriptionForChange(txCtx, subscriptionID, true)
+		if err != nil {
+			return err
+		}
+		req.Subscription = locked
+
+		// Taken under the row lock, so two concurrent payment-gated changes cannot both pass.
+		existing, err := anyPendingCheckoutSession(txCtx, s.ServiceParams, locked.CustomerID, locked.ID)
+		if err != nil {
+			return err
+		}
+		if len(existing) > 0 {
+			return ierr.NewError("a pending checkout session already exists for this subscription").
+				WithHint("Complete or cancel the existing checkout before starting another payment-gated change").
+				WithReportableDetails(map[string]any{
+					"subscription_id":     locked.ID,
+					"checkout_session_id": existing[0].ID,
+				}).
+				Mark(ierr.ErrAlreadyExists)
+		}
+
+		resolved, err := s.Resolve(txCtx, req)
+		if err != nil {
+			return err
+		}
+		if !resolved.getQuote().NetAmount().GreaterThan(decimal.Zero) {
+			return nil
+		}
+
+		// Validated before anything is written, so a malformed payload cannot leave pending
+		// associations behind for a session that was never going to be created.
+		checkoutParams = addonChangeCheckoutParams(resolved)
+		if err := checkoutParams.Validate(); err != nil {
+			return err
+		}
+
+		// Attaches only: applying a removal now would end line items before payment, and
+		// cancelling the checkout would strand the customer on the cheaper state.
+		if err := s.PersistPending(txCtx, resolved); err != nil {
+			return err
+		}
+
+		// The draft locks exactly what pay-later would have billed.
+		drafted, err := s.Settle(txCtx, resolved, SettleModeDraft)
+		if err != nil {
+			return err
+		}
+
+		config, settled = resolved, drafted
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if config == nil {
+		return nil, nil
+	}
+
+	sub := config.getSubscription()
+	session, err := NewCheckoutSessionService(s.ServiceParams).StartPayFirstCheckoutSession(ctx, &dto.PayFirstCheckoutRequest{
+		CustomerID: sub.CustomerID,
+		Action:     types.CheckoutActionAddAddon,
+		Configuration: types.CheckoutConfiguration{
+			AddAddonParams: checkoutParams,
+		},
+		DraftInvoice: &settled.GetDraft().Invoice,
+		Checkout:     checkout,
+	})
+	if err != nil {
+		s.archiveGatedChange(ctx, config, settled.GetDraft(), err)
+		return nil, err
+	}
+
+	return &ExecutePayFirstResponse{config: config, session: session, settled: settled}, nil
+}
+
+// addonChangeCheckoutParams records everything completion needs to replay the change without
+// trusting execute-time state.
+func addonChangeCheckoutParams(config *addonChangeConfig) *types.AddAddonParams {
+	params := &types.AddAddonParams{SubscriptionID: config.getSubscription().ID}
+
+	for _, attach := range config.getAttaches() {
+		req := attach.getRequest()
+		params.Addons = append(params.Addons, types.AddAddonRef{
+			AssociationID:     attach.getAssociation().ID,
+			AddonID:           req.AddonID,
+			Cadence:           req.Cadence,
+			ProrationBehavior: req.ProrationBehavior,
+			StartDate:         attach.getRequestedStart(),
+		})
+	}
+
+	for _, detach := range config.getDetaches() {
+		params.Removes = append(params.Removes, types.RemoveAddonRef{
+			AssociationID:     detach.getAssociation().ID,
+			Reason:            detach.getReason(),
+			ProrationBehavior: detach.getBehavior(),
+			EffectiveDate:     detach.getEffectiveDate(),
+		})
+	}
+
+	return params
+}
+
+// archiveGatedChange undoes the inert state a failed provider call left behind. The associations
+// never activated, so they are archived rather than cancelled.
+func (s *addonChangeService) archiveGatedChange(
+	ctx context.Context,
+	config *addonChangeConfig,
+	draft *dto.InvoiceResponse,
+	cause error,
+) {
+	ids := lo.Map(config.getAttaches(), func(attach *addonAttachParams, _ int) string {
+		return attach.getAssociation().ID
+	})
+	if len(ids) > 0 {
+		if err := s.AddonAssociationRepo.DeleteBulk(ctx, ids); err != nil {
+			s.Logger.Error(ctx, "failed to archive pending addon associations after pay-first failure",
+				"error", err,
+				"association_ids", ids,
+				"original_error", cause,
+			)
+		}
+	}
+
+	if draft != nil {
+		if err := s.InvoiceRepo.Delete(ctx, draft.ID); err != nil {
+			s.Logger.Error(ctx, "failed to archive draft invoice after pay-first failure",
+				"error", err,
+				"invoice_id", draft.ID,
+				"original_error", cause,
+			)
+		}
+	}
+}
+
+func validateAddonChangeCheckout(req AddonChangeRequest, checkout *dto.CheckoutParams) error {
+	if checkout == nil {
+		return ierr.NewError("payment-gated addon change requires checkout params").
+			Mark(ierr.ErrValidation)
+	}
+	if err := checkout.Validate(); err != nil {
+		return err
+	}
+
+	sub := req.Subscription
+	for _, add := range req.Adds {
+		addReq := add.Request
+		if len(addReq.OverrideLineItems) > 0 || len(addReq.LineItemCommitments) > 0 {
+			return ierr.NewError("override_line_items and line_item_commitments are not supported with checkout").
+				WithHint("Send the change without checkout to use price overrides or line item commitments").
+				WithReportableDetails(map[string]any{
+					"subscription_id": sub.ID,
+					"addon_id":        addReq.AddonID,
+				}).
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	if sub.SubscriptionStatus != types.SubscriptionStatusActive {
+		return ierr.NewError("subscription status does not allow a payment-gated addon change").
+			WithHint("Checkout is only supported for active subscriptions").
+			WithReportableDetails(map[string]any{
+				"subscription_id":     sub.ID,
+				"subscription_status": sub.SubscriptionStatus,
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
 }
 
 func (s *addonChangeService) Preview(

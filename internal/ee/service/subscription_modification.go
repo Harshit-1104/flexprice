@@ -61,7 +61,7 @@ func (s *subscriptionModificationService) Execute(ctx context.Context, subscript
 	case dto.SubscriptionModifyTypeAddon:
 		return s.executeAddonModification(ctx, subscriptionID, req.AddonParams, req.Checkout)
 	case dto.SubscriptionModifyTypeAddons:
-		return s.executeAddonsModification(ctx, subscriptionID, req.AddonsParams)
+		return s.executeAddonsModification(ctx, subscriptionID, req.AddonsParams, req.Checkout)
 	default:
 		return nil, ierr.NewError("unknown modification type: " + string(req.Type)).
 			WithHint("Valid values: inheritance, quantity_change, grouped_invoicing, trial_end, coupon, tax, addon, addons").

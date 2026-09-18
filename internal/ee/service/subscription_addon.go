@@ -11,11 +11,11 @@ import (
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/samber/lo"
-	"github.com/shopspring/decimal"
 )
 
-// AttachAddon attaches an addon and settles the proration it raises.
-func (s *subscriptionService) AttachAddon(
+// attachAddon attaches an addon and settles the proration it raises. It is a one-entry adapter
+// over AddonChangeService.
+func (s *subscriptionService) attachAddon(
 	ctx context.Context,
 	sub *subscription.Subscription,
 	req *dto.AddAddonToSubscriptionRequest,
@@ -45,27 +45,16 @@ func (s *subscriptionService) AttachAddon(
 	}
 
 	if checkout != nil {
-		if err := validateAddonCheckout(sub, req, checkout); err != nil {
-			return nil, err
-		}
-
-		// Quoted without the row lock: the provider call cannot sit inside a transaction, so
-		// pay-first commits its pending state separately.
-		quoted, err := changeSvc.Resolve(ctx, changeReq)
+		gated, err := changeSvc.ExecutePayFirst(ctx, changeReq, checkout)
 		if err != nil {
 			return nil, err
 		}
 
-		if quoted.getQuote().TotalChargeAmount.GreaterThan(decimal.Zero) {
-			resp, err := s.settleAddAddonPayFirst(ctx, quoted.getAttaches()[0], quoted.getQuote(), checkout)
-			if err != nil {
-				return nil, err
-			}
-
+		if gated != nil {
 			return &dto.AddonChangeResult{
-				Association:     resp.AddonAssociation,
-				CheckoutSession: resp.CheckoutSession,
-				Invoice:         resp.Invoice,
+				Association:     gated.getConfig().getAttaches()[0].getAssociation(),
+				CheckoutSession: gated.getSession(),
+				Invoice:         gated.getSettled().GetDraft(),
 			}, nil
 		}
 		// Zero or negative net → nothing to collect, so fall through and attach immediately.
@@ -79,38 +68,6 @@ func (s *subscriptionService) AttachAddon(
 	return attachChangeResult(config, settled), nil
 }
 
-func validateAddonCheckout(
-	sub *subscription.Subscription,
-	req *dto.AddAddonToSubscriptionRequest,
-	checkout *dto.CheckoutParams,
-) error {
-	if err := checkout.Validate(); err != nil {
-		return err
-	}
-
-	if len(req.OverrideLineItems) > 0 || len(req.LineItemCommitments) > 0 {
-		return ierr.NewError("override_line_items and line_item_commitments are not supported with checkout").
-			WithHint("Attach without checkout to use price overrides or line item commitments").
-			WithReportableDetails(map[string]interface{}{
-				"subscription_id": sub.ID,
-				"addon_id":        req.AddonID,
-			}).
-			Mark(ierr.ErrValidation)
-	}
-
-	if sub.SubscriptionStatus != types.SubscriptionStatusActive {
-		return ierr.NewError("subscription status does not allow a payment-gated addon attach").
-			WithHint("Checkout is only supported for active subscriptions").
-			WithReportableDetails(map[string]interface{}{
-				"subscription_id":     sub.ID,
-				"subscription_status": sub.SubscriptionStatus,
-			}).
-			Mark(ierr.ErrValidation)
-	}
-
-	return nil
-}
-
 func attachChangeResult(config *addonChangeConfig, settled *SettleProrationResult) *dto.AddonChangeResult {
 	attach := config.getAttaches()[0]
 
@@ -122,99 +79,11 @@ func attachChangeResult(config *addonChangeConfig, settled *SettleProrationResul
 	}
 }
 
-func (s *subscriptionService) settleAddAddonPayFirst(
+// anyPendingCheckoutSession returns the outstanding payment-gated change on a subscription, if
+// any. At most one can exist: starting a second is rejected against this very lookup.
+func anyPendingCheckoutSession(
 	ctx context.Context,
-	params *addonAttachParams,
-	summary *LineItemProrationSummary,
-	checkout *dto.CheckoutParams,
-) (*dto.AddAddonToSubscriptionResponse, error) {
-	if params == nil || summary == nil || checkout == nil {
-		return nil, ierr.NewError("pay-first addon attach requires a plan, proration and checkout").
-			Mark(ierr.ErrValidation)
-	}
-
-	sub := params.getSubscription()
-	req := params.getRequest()
-
-	checkoutParams := &types.AddAddonParams{
-		SubscriptionID: sub.ID,
-		Addons: []types.AddAddonRef{{
-			AssociationID:     params.getAssociation().ID,
-			AddonID:           req.AddonID,
-			Cadence:           req.Cadence,
-			ProrationBehavior: req.ProrationBehavior,
-			StartDate:         params.getRequestedStart(),
-		}},
-	}
-	if err := checkoutParams.Validate(); err != nil {
-		return nil, err
-	}
-
-	existing, err := s.getAnyPendingAddonCheckoutSession(ctx, sub.CustomerID, sub.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(existing) > 0 {
-		return nil, ierr.NewError("a pending checkout session already exists for this subscription").
-			WithHint("Complete or cancel the existing checkout before starting another payment-gated change").
-			WithReportableDetails(map[string]any{
-				"subscription_id":     sub.ID,
-				"checkout_session_id": existing[0].ID,
-			}).
-			Mark(ierr.ErrAlreadyExists)
-	}
-
-	pendingAssociation := params.getAssociation()
-	pendingAssociation.AddonStatus = types.AddonStatusPending
-	if err := s.AddonAssociationRepo.Create(ctx, pendingAssociation); err != nil {
-		return nil, err
-	}
-
-	// The draft locks exactly what pay-later would have billed.
-	drafted, err := NewLineItemProrationService(s.ServiceParams).Settle(ctx, NewSettleProrationRequest(
-		sub, summary, params.getEffectiveDate(), sub.CurrentPeriodEnd,
-		"Subscription update", params.prorationIdempotencyKey(), SettleModeDraft,
-	))
-	if err != nil {
-		s.Logger.Error(ctx, "failed to create draft proration invoice for payment-gated addon attach",
-			"error", err,
-			"subscription_id", sub.ID,
-			"association_id", pendingAssociation.ID,
-		)
-		s.archivePendingAddonAssociation(ctx, pendingAssociation, err)
-		return nil, err
-	}
-	draftInvoice := drafted.Draft
-
-	checkoutSvc := NewCheckoutSessionService(s.ServiceParams)
-	sessionResp, err := checkoutSvc.StartPayFirstCheckoutSession(ctx, &dto.PayFirstCheckoutRequest{
-		CustomerID: sub.CustomerID,
-		Action:     types.CheckoutActionAddAddon,
-		Configuration: types.CheckoutConfiguration{
-			AddAddonParams: checkoutParams,
-		},
-		DraftInvoice: &draftInvoice.Invoice,
-		Checkout:     checkout,
-	})
-	if err != nil {
-		s.archivePendingAddonAssociation(ctx, pendingAssociation, err)
-		return nil, err
-	}
-
-	latestInvoice, invErr := NewInvoiceService(s.ServiceParams).GetInvoice(ctx, draftInvoice.ID)
-	if invErr != nil {
-		latestInvoice = draftInvoice
-	}
-
-	return &dto.AddAddonToSubscriptionResponse{
-		AddonAssociation: pendingAssociation,
-		CheckoutSession:  sessionResp,
-		Invoice:          latestInvoice,
-	}, nil
-}
-
-func (s *subscriptionService) getAnyPendingAddonCheckoutSession(
-	ctx context.Context,
+	sp ServiceParams,
 	customerID string,
 	subscriptionID string,
 ) ([]*domainCheckout.CheckoutSession, error) {
@@ -233,24 +102,40 @@ func (s *subscriptionService) getAnyPendingAddonCheckoutSession(
 	}
 	filter.Limit = lo.ToPtr(1)
 
-	return s.CheckoutSessionRepo.List(ctx, filter)
+	return sp.CheckoutSessionRepo.List(ctx, filter)
 }
 
-func (s *subscriptionService) archivePendingAddonAssociation(
+// pendingCheckoutSessionForAssociation reports whether an outstanding checkout already gates this
+// association's removal. In a mixed batch the association stays active while the session is open,
+// so without this a concurrent detach would remove it and completion would remove it again.
+func (s *subscriptionService) pendingCheckoutSessionForAssociation(
 	ctx context.Context,
-	association *addonassociation.AddonAssociation,
-	cause error,
-) {
-	if err := s.AddonAssociationRepo.Delete(ctx, association.ID); err != nil {
-		s.Logger.Error(ctx, "failed to archive pending addon association after pay-first failure",
-			"error", err,
-			"association_id", association.ID,
-			"original_error", cause,
-		)
+	sub *subscription.Subscription,
+	associationID string,
+) (bool, error) {
+	sessions, err := anyPendingCheckoutSession(ctx, s.ServiceParams, sub.CustomerID, sub.ID)
+	if err != nil {
+		return false, err
 	}
+
+	for _, session := range sessions {
+		cfg := session.Configuration.ToCheckoutConfiguration()
+		if cfg.AddAddonParams == nil {
+			continue
+		}
+		for _, ref := range cfg.AddAddonParams.Removes {
+			if ref.AssociationID == associationID {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
 
-// applyAddAddonParams activates the pending associations a completed checkout session gated.
+// applyAddAddonCheckoutParams replays the change a completed checkout session gated: its
+// removals are applied for the first time and its attaches are activated, as ONE change so a
+// swap closes and reopens each shared feature's grant window once.
 //
 // The charge is NOT recomputed — it is already locked on the session's draft invoice, and
 // settling is finalizeCheckoutInvoiceAndPayment's job. Credit-grant proration is not
@@ -260,80 +145,145 @@ func (s *subscriptionService) applyAddAddonCheckoutParams(ctx context.Context, p
 		return err
 	}
 
-	// One transaction, row locked first, for every ref the session gated.
 	return s.DB.WithTx(ctx, func(ctx context.Context) error {
 		sub, err := s.loadSubscriptionForChange(ctx, params.SubscriptionID, true)
 		if err != nil {
 			return err
 		}
 
-		for _, ref := range params.Addons {
-			if err := s.applyAddAddonRef(ctx, sub, ref); err != nil {
-				return err
-			}
+		// The subscription can be cancelled while its checkout is outstanding; applying the
+		// change then would attach addons to a dead subscription.
+		if sub.SubscriptionStatus != types.SubscriptionStatusActive {
+			return ierr.NewError("subscription is no longer active").
+				WithHint("The subscription was cancelled or paused while its checkout was outstanding").
+				WithReportableDetails(map[string]any{
+					"subscription_id":     sub.ID,
+					"subscription_status": sub.SubscriptionStatus,
+				}).
+				Mark(ierr.ErrValidation)
 		}
 
-		return nil
+		req, err := s.replayAddonChangeRequest(ctx, sub, params)
+		if err != nil {
+			return err
+		}
+		if len(req.Adds) == 0 && len(req.Removes) == 0 {
+			s.Logger.Info(ctx, "checkout replay already applied, nothing to do",
+				"subscription_id", sub.ID,
+			)
+			return nil
+		}
+
+		changeSvc := NewAddonChangeService(s.ServiceParams)
+		config, err := changeSvc.Resolve(ctx, req)
+		if err != nil {
+			return err
+		}
+
+		return changeSvc.Persist(ctx, config)
 	})
 }
 
-func (s *subscriptionService) applyAddAddonRef(
+// replayAddonChangeRequest rebuilds the gated change from the session payload, dropping the
+// entries a previous completion already applied so a double-delivery is a no-op.
+func (s *subscriptionService) replayAddonChangeRequest(
 	ctx context.Context,
 	sub *subscription.Subscription,
-	ref types.AddAddonRef,
-) error {
-	association, err := s.AddonAssociationRepo.GetByID(ctx, ref.AssociationID)
+	params *types.AddAddonParams,
+) (AddonChangeRequest, error) {
+	ids := make([]string, 0, len(params.Addons)+len(params.Removes))
+	for _, ref := range params.Addons {
+		ids = append(ids, ref.AssociationID)
+	}
+	for _, ref := range params.Removes {
+		ids = append(ids, ref.AssociationID)
+	}
+
+	associations, err := s.AddonAssociationRepo.GetByIDs(ctx, ids)
 	if err != nil {
-		return err
+		return AddonChangeRequest{}, err
+	}
+	byID := lo.KeyBy(associations, func(a *addonassociation.AddonAssociation) string { return a.ID })
+
+	req := AddonChangeRequest{Subscription: sub}
+
+	for _, ref := range params.Removes {
+		association, ok := byID[ref.AssociationID]
+		if !ok {
+			return AddonChangeRequest{}, ierr.NewError("addon association named by the checkout no longer exists").
+				WithReportableDetails(map[string]any{"association_id": ref.AssociationID}).
+				Mark(ierr.ErrNotFound)
+		}
+
+		// Already ended by a previous completion of this same session.
+		if association.EndDate != nil {
+			s.Logger.Info(ctx, "addon association already removed, skipping checkout replay",
+				"association_id", association.ID,
+				"subscription_id", sub.ID,
+			)
+			continue
+		}
+
+		req.Removes = append(req.Removes, &dto.RemoveAddonRequest{
+			AddonAssociationID: ref.AssociationID,
+			Reason:             ref.Reason,
+			ProrationBehavior:  ref.ProrationBehavior,
+			EffectiveDate:      lo.ToPtr(ref.EffectiveDate),
+			// This completion IS the pending session, so its own removals must not trip the
+			// guard that blocks concurrent detaches.
+			SkipPendingCheckoutGuard: true,
+		})
 	}
 
-	switch association.AddonStatus {
-	case types.AddonStatusActive:
-		s.Logger.Info(ctx, "addon association already active, skipping checkout replay",
-			"association_id", association.ID,
-			"addon_id", ref.AddonID,
-			"subscription_id", sub.ID,
-		)
-		return nil
-	case types.AddonStatusPending:
-		// The state we expect; fall through and activate.
-	default:
-		return ierr.NewError("addon association is not pending activation").
-			WithHint("The addon was cancelled or removed while its checkout was outstanding").
-			WithReportableDetails(map[string]any{
-				"association_id":  association.ID,
-				"addon_id":        ref.AddonID,
-				"subscription_id": sub.ID,
-				"addon_status":    association.AddonStatus,
-			}).
-			Mark(ierr.ErrValidation)
+	for _, ref := range params.Addons {
+		association, ok := byID[ref.AssociationID]
+		if !ok {
+			return AddonChangeRequest{}, ierr.NewError("addon association named by the checkout no longer exists").
+				WithReportableDetails(map[string]any{"association_id": ref.AssociationID}).
+				Mark(ierr.ErrNotFound)
+		}
+
+		switch association.AddonStatus {
+		case types.AddonStatusActive:
+			s.Logger.Info(ctx, "addon association already active, skipping checkout replay",
+				"association_id", association.ID,
+				"addon_id", ref.AddonID,
+				"subscription_id", sub.ID,
+			)
+			continue
+		case types.AddonStatusPending:
+			// The state we expect; fall through and activate.
+		default:
+			return AddonChangeRequest{}, ierr.NewError("addon association is not pending activation").
+				WithHint("The addon was cancelled or removed while its checkout was outstanding").
+				WithReportableDetails(map[string]any{
+					"association_id":  association.ID,
+					"addon_id":        ref.AddonID,
+					"subscription_id": sub.ID,
+					"addon_status":    association.AddonStatus,
+				}).
+				Mark(ierr.ErrValidation)
+		}
+
+		req.Adds = append(req.Adds, AddonAdd{
+			Request: &dto.AddAddonToSubscriptionRequest{
+				AddonID:              ref.AddonID,
+				Cadence:              ref.Cadence,
+				StartDate:            lo.ToPtr(ref.StartDate),
+				ProrationBehavior:    ref.ProrationBehavior,
+				Metadata:             association.Metadata,
+				SkipEntityValidation: true,
+			},
+			Existing: association,
+		})
 	}
 
-	req := &dto.AddAddonToSubscriptionRequest{
-		AddonID:              ref.AddonID,
-		Cadence:              ref.Cadence,
-		StartDate:            lo.ToPtr(ref.StartDate),
-		ProrationBehavior:    ref.ProrationBehavior,
-		Metadata:             association.Metadata,
-		SkipEntityValidation: true,
-	}
-
-	changeSvc := NewAddonChangeService(s.ServiceParams)
-	config, err := changeSvc.Resolve(ctx, AddonChangeRequest{
-		Subscription: sub,
-		Adds:         []AddonAdd{{Request: req, Existing: association}},
-	})
-	if err != nil {
-		return err
-	}
-
-	// No settlement: the charge is already locked on the session's draft invoice.
-	return changeSvc.Persist(ctx, config)
+	return req, nil
 }
 
-// DetachAddon removes an addon and credits back the unused prepaid time it paid for. It is a
+// detachAddon removes an addon and credits back the unused prepaid time it paid for. It is a
 // one-entry adapter over AddonChangeService.
-func (s *subscriptionService) DetachAddon(
+func (s *subscriptionService) detachAddon(
 	ctx context.Context,
 	req *dto.RemoveAddonRequest,
 	subscriptionId string,
@@ -436,6 +386,22 @@ func (s *subscriptionService) createAddonDetachParams(
 				"addon_id":             association.AddonID,
 			}).
 			Mark(ierr.ErrValidation)
+	}
+
+	if !req.SkipPendingCheckoutGuard {
+		gated, err := s.pendingCheckoutSessionForAssociation(ctx, sub, association.ID)
+		if err != nil {
+			return nil, err
+		}
+		if gated {
+			return nil, ierr.NewError("addon removal is pending payment").
+				WithHint("Complete or cancel the pending checkout for this subscription first").
+				WithReportableDetails(map[string]interface{}{
+					"addon_association_id": association.ID,
+					"subscription_id":      sub.ID,
+				}).
+				Mark(ierr.ErrValidation)
+		}
 	}
 
 	if association.EndDate != nil {

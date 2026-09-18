@@ -26,7 +26,7 @@ func (s *SubscriptionServiceSuite) attachForRemoval(addonID string, billed int64
 	ctx := s.GetContext()
 	sub := s.testData.subscription
 
-	attached, err := s.service.(*subscriptionService).AttachAddon(ctx, sub, &dto.AddAddonToSubscriptionRequest{
+	attached, err := s.service.(*subscriptionService).attachAddon(ctx, sub, &dto.AddAddonToSubscriptionRequest{
 		AddonID:           addonID,
 		Cadence:           types.AddonCadenceRecurring,
 		StartDate:         lo.ToPtr(sub.CurrentPeriodStart),
@@ -236,7 +236,7 @@ func (s *SubscriptionServiceSuite) TestAddonAttach_PriceOverride_BillsTheOverrid
 	listQuote := listPrice.getQuote().NetAmount()
 	s.Require().True(listQuote.IsPositive())
 
-	_, err = subSvc.AttachAddon(ctx, sub, &dto.AddAddonToSubscriptionRequest{
+	_, err = subSvc.attachAddon(ctx, sub, &dto.AddAddonToSubscriptionRequest{
 		AddonID:           "addon_override",
 		Cadence:           types.AddonCadenceRecurring,
 		StartDate:         lo.ToPtr(at),

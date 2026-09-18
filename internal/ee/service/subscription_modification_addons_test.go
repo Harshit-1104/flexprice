@@ -32,6 +32,15 @@ func (s *SubscriptionServiceSuite) modifyAdd(addonID string, at time.Time) *dto.
 	}
 }
 
+func (s *SubscriptionServiceSuite) modifyAddAt(addonID string, changeAt types.ScheduleType) *dto.AddAddonToSubscriptionRequest {
+	return &dto.AddAddonToSubscriptionRequest{
+		AddonID:           addonID,
+		Cadence:           types.AddonCadenceRecurring,
+		ProrationBehavior: types.ProrationBehaviorCreateProrations,
+		ChangeAt:          lo.ToPtr(changeAt),
+	}
+}
+
 func (s *SubscriptionServiceSuite) modifyRemove(associationID string, at time.Time) *dto.RemoveAddonRequest {
 	return &dto.RemoveAddonRequest{
 		AddonAssociationID: associationID,
@@ -172,4 +181,84 @@ func (s *SubscriptionServiceSuite) TestAddonsModification_InvalidRequestRejected
 		Type: dto.SubscriptionModifyTypeAddons,
 	})
 	s.Error(err, "type addons without addons_params is rejected")
+}
+
+// change_at is resolved once per batch, so two immediate entries land on the same date and
+// prorate in one pass instead of splitting into two documents.
+func (s *SubscriptionServiceSuite) TestExecuteAddonsModification_ChangeAtImmediate_SharesOneDate() {
+	ctx := s.GetContext()
+	sub := s.monthlyPeriodSubscription()
+
+	s.seedFixedPriceAddon("addon_ca_a", decimal.NewFromInt(30), types.InvoiceCadenceAdvance)
+	s.seedFixedPriceAddon("addon_ca_b", decimal.NewFromInt(40), types.InvoiceCadenceAdvance)
+
+	_, err := s.modificationService().Execute(ctx, sub.ID, s.addonsRequest(&dto.SubModifyAddonsParams{
+		Adds: []*dto.AddAddonToSubscriptionRequest{
+			s.modifyAddAt("addon_ca_a", types.ScheduleTypeImmediate),
+			s.modifyAddAt("addon_ca_b", types.ScheduleTypeImmediate),
+		},
+	}))
+	s.Require().NoError(err)
+
+	s.Require().Len(s.oneOffInvoicesFor(sub.ID), 1, "two immediate entries settle as one document")
+	s.Len(s.addonLineItemsFor(sub.ID, "addon_ca_a"), 1)
+	s.Len(s.addonLineItemsFor(sub.ID, "addon_ca_b"), 1)
+}
+
+// end_of_period resolves to the subscription's period end, which is outside the current
+// period, so the entry contributes no proration charge.
+func (s *SubscriptionServiceSuite) TestExecuteAddonsModification_ChangeAtPeriodEnd_ChargesNothingNow() {
+	ctx := s.GetContext()
+	sub := s.monthlyPeriodSubscription()
+
+	s.seedFixedPriceAddon("addon_ca_end", decimal.NewFromInt(30), types.InvoiceCadenceAdvance)
+
+	resp, err := s.modificationService().Execute(ctx, sub.ID, s.addonsRequest(&dto.SubModifyAddonsParams{
+		Adds: []*dto.AddAddonToSubscriptionRequest{s.modifyAddAt("addon_ca_end", types.ScheduleTypePeriodEnd)},
+	}))
+	s.Require().NoError(err)
+
+	created := s.changedLineItemsByAction(resp, dto.ChangedLineItemActionCreated)
+	s.Require().Len(created, 1)
+	s.True(lo.FromPtr(created[0].StartDate).Equal(sub.CurrentPeriodEnd),
+		"the attach starts at the period end, not now")
+	s.Empty(s.oneOffInvoicesFor(sub.ID), "a period-end attach bills nothing in the current period")
+}
+
+// change_at works on the single-addon path too: both reach the same Resolve.
+func (s *SubscriptionServiceSuite) TestAttachAddon_ChangeAtPeriodEnd_StartsAtPeriodEnd() {
+	ctx := s.GetContext()
+	sub := s.monthlyPeriodSubscription()
+
+	s.seedFixedPriceAddon("addon_single_ca", decimal.NewFromInt(30), types.InvoiceCadenceAdvance)
+
+	result, err := s.service.(*subscriptionService).attachAddon(ctx, sub, &dto.AddAddonToSubscriptionRequest{
+		AddonID:           "addon_single_ca",
+		Cadence:           types.AddonCadenceRecurring,
+		ProrationBehavior: types.ProrationBehaviorCreateProrations,
+		ChangeAt:          lo.ToPtr(types.ScheduleTypePeriodEnd),
+	}, nil)
+	s.Require().NoError(err)
+
+	s.Require().Len(result.GetCreatedLineItems(), 1)
+	s.True(result.GetCreatedLineItems()[0].StartDate.Equal(sub.CurrentPeriodEnd))
+	s.Empty(s.oneOffInvoicesFor(sub.ID), "a period-end attach bills nothing in the current period")
+}
+
+// The resolved request must not write back into the caller's DTO.
+func (s *SubscriptionServiceSuite) TestAddonsModification_ChangeAt_DoesNotMutateTheRequest() {
+	ctx := s.GetContext()
+	sub := s.monthlyPeriodSubscription()
+
+	s.seedFixedPriceAddon("addon_ca_pure", decimal.NewFromInt(30), types.InvoiceCadenceAdvance)
+
+	add := s.modifyAddAt("addon_ca_pure", types.ScheduleTypeImmediate)
+	_, err := s.modificationService().Execute(ctx, sub.ID, s.addonsRequest(&dto.SubModifyAddonsParams{
+		Adds: []*dto.AddAddonToSubscriptionRequest{add},
+	}))
+	s.Require().NoError(err)
+
+	s.Nil(add.StartDate, "resolution happens on a copy")
+	s.Require().NotNil(add.ChangeAt)
+	s.Equal(types.ScheduleTypeImmediate, *add.ChangeAt)
 }

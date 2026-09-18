@@ -11,14 +11,37 @@ func (s *subscriptionModificationService) executeAddonsModification(
 	ctx context.Context,
 	subscriptionID string,
 	params *dto.SubModifyAddonsParams,
+	checkout *dto.CheckoutParams,
 ) (*dto.SubscriptionModifyResponse, error) {
 	sub, err := s.loadSubscriptionWithLineItems(ctx, subscriptionID)
 	if err != nil {
 		return nil, err
 	}
 
-	config, settled, err := NewAddonChangeService(s.serviceParams).
-		Execute(ctx, NewAddonChangeRequest(sub, params))
+	changeSvc := NewAddonChangeService(s.serviceParams)
+	req := NewAddonChangeRequest(sub, params)
+
+	if checkout != nil {
+		gated, err := changeSvc.ExecutePayFirst(ctx, req, checkout)
+		if err != nil {
+			return nil, err
+		}
+
+		// Nothing is live yet: the attaches are pending and the removals untouched, so there
+		// is no subscription update to announce.
+		if gated != nil {
+			return s.addonModifyResponse(
+				ctx,
+				subscriptionID,
+				addonBatchChangedLineItems(gated.getConfig(), false),
+				nil,
+				gated.getSession(),
+			)
+		}
+		// Zero or negative net → nothing to collect, so fall through and apply immediately.
+	}
+
+	config, settled, err := changeSvc.Execute(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -26,8 +49,13 @@ func (s *subscriptionModificationService) executeAddonsModification(
 	s.publishSystemEvent(ctx, types.WebhookEventSubscriptionUpdated, subscriptionID)
 	triggerHubSpotDealSync(ctx, s.serviceParams, subscriptionID)
 
-	return s.addonModifyResponse(ctx, subscriptionID,
-		addonBatchChangedLineItems(config, false), settled.GetChanged(), nil)
+	return s.addonModifyResponse(
+		ctx,
+		subscriptionID,
+		addonBatchChangedLineItems(config, false),
+		settled.GetChanged(),
+		nil,
+	)
 }
 
 func (s *subscriptionModificationService) previewAddonsModification(

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"github.com/flexprice/flexprice/internal/domain/addonassociation"
 	"time"
 
 	"github.com/flexprice/flexprice/internal/api/dto"
@@ -302,20 +303,26 @@ func (s *checkoutSessionService) cleanupCheckoutSession(ctx context.Context, ses
 		subSvc.archiveDraftCheckoutSubscription(ctx, cfg.CreateSubscriptionParams.SubscriptionID)
 	}
 
-	if cfg.AddAddonParams != nil {
-		for _, ref := range cfg.AddAddonParams.Addons {
-			association, err := s.AddonAssociationRepo.GetByID(ctx, ref.AssociationID)
-			if err != nil {
-				s.Logger.Error(ctx, "failed to load pending addon association for checkout cleanup",
-					"association_id", ref.AssociationID, "error", err)
-				continue
-			}
-			if association.AddonStatus != types.AddonStatusPending {
-				continue
-			}
-			if err := s.AddonAssociationRepo.Delete(ctx, ref.AssociationID); err != nil {
-				s.Logger.Error(ctx, "failed to archive pending addon association",
-					"association_id", ref.AssociationID, "error", err)
+	// Only the attaches wrote anything: a gated removal leaves its association active and
+	// billable until payment lands, so an abandoned checkout has nothing to undo for it.
+	if cfg.AddAddonParams != nil && len(cfg.AddAddonParams.Addons) > 0 {
+		ids := lo.Map(cfg.AddAddonParams.Addons, func(ref types.AddAddonRef, _ int) string {
+			return ref.AssociationID
+		})
+
+		associations, err := s.AddonAssociationRepo.GetByIDs(ctx, ids)
+		if err != nil {
+			s.Logger.Error(ctx, "failed to load pending addon associations for checkout cleanup",
+				"association_ids", ids, "error", err)
+		} else {
+			pending := lo.FilterMap(associations, func(a *addonassociation.AddonAssociation, _ int) (string, bool) {
+				return a.ID, a.AddonStatus == types.AddonStatusPending
+			})
+			if len(pending) > 0 {
+				if err := s.AddonAssociationRepo.DeleteBulk(ctx, pending); err != nil {
+					s.Logger.Error(ctx, "failed to archive pending addon associations",
+						"association_ids", pending, "error", err)
+				}
 			}
 		}
 	}

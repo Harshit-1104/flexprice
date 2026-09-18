@@ -18,7 +18,7 @@ func (s *subscriptionModificationService) executeAddonModification(
 	params *dto.SubModifyAddonParams,
 	checkout *dto.CheckoutParams,
 ) (*dto.SubscriptionModifyResponse, error) {
-	subSvc := NewSubscriptionService(s.serviceParams)
+	subSvc := &subscriptionService{ServiceParams: s.serviceParams}
 
 	var (
 		result *dto.AddonChangeResult
@@ -29,10 +29,10 @@ func (s *subscriptionModificationService) executeAddonModification(
 	case dto.SubscriptionModificationActionAdd:
 		var sub *subscription.Subscription
 		if sub, err = s.loadSubscriptionWithLineItems(ctx, subscriptionID); err == nil {
-			result, err = subSvc.AttachAddon(ctx, sub, params.Add, checkout)
+			result, err = subSvc.attachAddon(ctx, sub, params.Add, checkout)
 		}
 	case dto.SubscriptionModificationActionRemove:
-		result, err = subSvc.DetachAddon(ctx, params.Remove, subscriptionID)
+		result, err = subSvc.detachAddon(ctx, params.Remove, subscriptionID)
 	default:
 		return nil, ierr.NewError("invalid action, action must be add or remove").Mark(ierr.ErrValidation)
 	}
@@ -56,7 +56,7 @@ func (s *subscriptionModificationService) previewAddonModification(
 	subscriptionID string,
 	params *dto.SubModifyAddonParams,
 ) (*dto.SubscriptionModifyResponse, error) {
-	subSvc := NewSubscriptionService(s.serviceParams)
+	subSvc := &subscriptionService{ServiceParams: s.serviceParams}
 
 	var (
 		result *dto.AddonChangeResult
@@ -68,11 +68,11 @@ func (s *subscriptionModificationService) previewAddonModification(
 		var sub *subscription.Subscription
 		if sub, err = s.loadSubscriptionWithLineItems(ctx, subscriptionID); err == nil {
 			params.Add.PreviewOnly = true
-			result, err = subSvc.AttachAddon(ctx, sub, params.Add, nil)
+			result, err = subSvc.attachAddon(ctx, sub, params.Add, nil)
 		}
 	case dto.SubscriptionModificationActionRemove:
 		params.Remove.PreviewOnly = true
-		result, err = subSvc.DetachAddon(ctx, params.Remove, subscriptionID)
+		result, err = subSvc.detachAddon(ctx, params.Remove, subscriptionID)
 	default:
 		return nil, ierr.NewError("invalid action, action must be add or remove").Mark(ierr.ErrValidation)
 	}

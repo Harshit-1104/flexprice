@@ -37,6 +37,7 @@ type SubModifyInheritanceRequest struct {
 var checkoutAllowedModifyTypes = []SubscriptionModifyType{
 	SubscriptionModifyTypeQuantityChange,
 	SubscriptionModifyTypeAddon,
+	SubscriptionModifyTypeAddons,
 }
 
 func (r *SubModifyInheritanceRequest) Validate() error {
@@ -324,8 +325,7 @@ func (r *SubModifyAddonParams) Validate() error {
 const maxAddonBatchEntries = 20
 
 // SubModifyAddonsParams adds and removes several addons as one change, settled as one netted
-// document. Entries are the single-addon requests verbatim, so per-entry validation and the
-// attach/detach paths are shared.
+// document. Entries are the single-addon requests verbatim, so every per-entry rule is shared.
 type SubModifyAddonsParams struct {
 	Adds    []*AddAddonToSubscriptionRequest `json:"adds,omitempty"`
 	Removes []*RemoveAddonRequest            `json:"removes,omitempty"`
@@ -494,6 +494,13 @@ func (r *ExecuteSubscriptionModifyRequest) validateCheckout() error {
 	if r.Type == SubscriptionModifyTypeAddon && r.AddonParams.Action == SubscriptionModificationActionRemove {
 		return ierr.NewError("checkout is not supported when removing an addon").
 			WithHint("Removing an addon issues a credit, so there is no payment to collect").
+			Mark(ierr.ErrValidation)
+	}
+
+	// A removes-only batch can only ever credit, so there is nothing to collect.
+	if r.Type == SubscriptionModifyTypeAddons && len(r.AddonsParams.Adds) == 0 {
+		return ierr.NewError("checkout is not supported when only removing addons").
+			WithHint("Removing addons issues a credit, so there is no payment to collect").
 			Mark(ierr.ErrValidation)
 	}
 
