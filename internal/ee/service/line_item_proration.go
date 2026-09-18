@@ -148,6 +148,13 @@ func (r *SettleProrationResult) GetChanged() []dto.ChangedInvoice {
 	return r.Changed
 }
 
+func (r *SettleProrationResult) GetDraft() *dto.InvoiceResponse {
+	if r == nil {
+		return nil
+	}
+	return r.Draft
+}
+
 type LineItemProrationService interface {
 	Compute(ctx context.Context, req LineItemProrationRequest) (*LineItemProrationSummary, error)
 
