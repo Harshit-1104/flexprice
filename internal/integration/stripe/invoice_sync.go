@@ -661,6 +661,28 @@ func (s *InvoiceSyncService) updateStripeInvoiceMetadata(ctx context.Context, st
 	return nil
 }
 
+// IsStripeInvoiceSettled reports whether the Stripe invoice synced for a FlexPrice invoice is already paid or voided.
+func (s *InvoiceSyncService) IsStripeInvoiceSettled(ctx context.Context, flexpriceInvoiceID string) (bool, error) {
+	mapping, err := s.getExistingStripeMapping(ctx, flexpriceInvoiceID)
+	if err != nil {
+		return false, nil
+	}
+
+	stripeClient, _, err := s.client.GetStripeClient(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	stripeInvoice, err := stripeClient.V1Invoices.Retrieve(ctx, mapping.ProviderEntityID, nil)
+	if err != nil {
+		return false, ierr.WithError(err).
+			WithHint("Unable to get invoice from Stripe").
+			Mark(ierr.ErrSystem)
+	}
+
+	return stripeInvoice.Status == stripe.InvoiceStatusPaid || stripeInvoice.Status == stripe.InvoiceStatusVoid, nil
+}
+
 // IsInvoiceSyncedToStripe checks if an invoice is already synced to Stripe
 func (s *InvoiceSyncService) IsInvoiceSyncedToStripe(ctx context.Context, invoiceID string) bool {
 	_, err := s.getExistingStripeMapping(ctx, invoiceID)

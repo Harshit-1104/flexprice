@@ -79,7 +79,7 @@ func (s *subscriptionPaymentProcessor) HandlePaymentBehavior(
 		)
 
 		// If payment succeeded completely, mark subscription as active
-		if result.Success {
+		if result.Success && sub.SubscriptionStatus != types.SubscriptionStatusCancelled {
 			s.Logger.Info(ctx, "manual flow payment successful - activating subscription",
 				"subscription_id", sub.ID,
 				"amount_paid", result.AmountPaid,

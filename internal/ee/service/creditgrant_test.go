@@ -12,6 +12,7 @@ import (
 	"github.com/flexprice/flexprice/internal/domain/creditgrant"
 	"github.com/flexprice/flexprice/internal/domain/creditgrantapplication"
 	"github.com/flexprice/flexprice/internal/domain/customer"
+	"github.com/flexprice/flexprice/internal/domain/invoice"
 	"github.com/flexprice/flexprice/internal/domain/plan"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
 	"github.com/flexprice/flexprice/internal/domain/wallet"
@@ -2687,4 +2688,175 @@ func (s *CreditGrantServiceTestSuite) TestCancelFutureSubscriptionGrants_EmptyAd
 
 	s.NotNil(s.grantEndDate(fromAddon))
 	s.NotNil(s.grantEndDate(fromPlan))
+}
+
+func (s *CreditGrantServiceTestSuite) TestShouldGateApplicationOnPayment() {
+	periodStart := s.testData.now.Truncate(time.Second)
+	periodEnd := periodStart.AddDate(0, 1, 0)
+	prevStart := periodStart.AddDate(0, -1, 0)
+	olderStart := periodStart.AddDate(0, -2, 0)
+
+	type inv struct {
+		start, end    time.Time
+		invoiceStatus types.InvoiceStatus
+		paymentStatus types.PaymentStatus
+	}
+	cycle := func(start, end time.Time, is types.InvoiceStatus, ps types.PaymentStatus) inv {
+		return inv{start: start, end: end, invoiceStatus: is, paymentStatus: ps}
+	}
+
+	tests := []struct {
+		name            string
+		paymentBehavior types.PaymentBehavior
+		reason          types.CreditGrantApplicationReason
+		cgaPeriodStart  time.Time
+		invoices        []inv
+		want            bool
+	}{
+		{
+			name:            "default_active is never gated",
+			paymentBehavior: types.PaymentBehaviorDefaultActive,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusPending)},
+			want:            false,
+		},
+		{
+			name:            "first-time recurring grant is not gated",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonFirstTimeRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusPending)},
+			want:            false,
+		},
+		{
+			name:            "period not rolled yet defers",
+			paymentBehavior: types.PaymentBehaviorDefaultIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodEnd,
+			want:            true,
+		},
+		{
+			name:            "no renewal invoice applies",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			want:            false,
+		},
+		{
+			name:            "skipped renewal invoice applies",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusSkipped, types.PaymentStatusPending)},
+			want:            false,
+		},
+		{
+			name:            "unpaid renewal invoice defers",
+			paymentBehavior: types.PaymentBehaviorErrorIfIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusPending)},
+			want:            true,
+		},
+		{
+			name:            "draft renewal invoice defers",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusDraft, types.PaymentStatusPending)},
+			want:            true,
+		},
+		{
+			name:            "paid renewal invoice applies",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusSucceeded)},
+			want:            false,
+		},
+		{
+			name:            "overpaid renewal invoice applies",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices:        []inv{cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusOverpaid)},
+			want:            false,
+		},
+		{
+			name:            "latest invoice decides over an older paid one",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices: []inv{
+				cycle(olderStart, prevStart, types.InvoiceStatusFinalized, types.PaymentStatusSucceeded),
+				cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusFailed),
+			},
+			want: true,
+		},
+		{
+			name:            "voided invoice is ignored",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart,
+			invoices: []inv{
+				cycle(olderStart, prevStart, types.InvoiceStatusFinalized, types.PaymentStatusSucceeded),
+				cycle(prevStart, periodStart, types.InvoiceStatusVoided, types.PaymentStatusPending),
+			},
+			want: false,
+		},
+		{
+			name:            "mid-period grant uses the invoice ending before it",
+			paymentBehavior: types.PaymentBehaviorAllowIncomplete,
+			reason:          types.ApplicationReasonRecurringCreditGrant,
+			cgaPeriodStart:  periodStart.AddDate(0, 0, 7),
+			invoices: []inv{
+				cycle(prevStart, periodStart, types.InvoiceStatusFinalized, types.PaymentStatusSucceeded),
+				cycle(periodStart, periodEnd, types.InvoiceStatusFinalized, types.PaymentStatusPending),
+			},
+			want: false,
+		},
+	}
+
+	for i, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := s.GetContext()
+			sub := &subscription.Subscription{
+				ID:                 types.GenerateUUIDWithPrefix(types.UUID_PREFIX_SUBSCRIPTION),
+				CustomerID:         s.testData.customer.ID,
+				CurrentPeriodStart: periodStart,
+				CurrentPeriodEnd:   periodEnd,
+				SubscriptionStatus: types.SubscriptionStatusActive,
+				PaymentBehavior:    string(tt.paymentBehavior),
+				BaseModel:          types.GetDefaultBaseModel(ctx),
+			}
+			for j, in := range tt.invoices {
+				s.NoError(s.GetStores().InvoiceRepo.Create(ctx, &invoice.Invoice{
+					ID:              types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE),
+					CustomerID:      s.testData.customer.ID,
+					SubscriptionID:  lo.ToPtr(sub.ID),
+					InvoiceType:     types.InvoiceTypeSubscription,
+					BillingReason:   string(types.InvoiceBillingReasonSubscriptionCycle),
+					InvoiceStatus:   in.invoiceStatus,
+					PaymentStatus:   in.paymentStatus,
+					Currency:        "usd",
+					AmountDue:       decimal.NewFromInt(10),
+					AmountRemaining: decimal.NewFromInt(10),
+					PeriodStart:     lo.ToPtr(in.start),
+					PeriodEnd:       lo.ToPtr(in.end),
+					BaseModel:       types.GetDefaultBaseModel(ctx),
+				}), "case %d invoice %d", i, j)
+			}
+			cga := &creditgrantapplication.CreditGrantApplication{
+				ID:                types.GenerateUUIDWithPrefix(types.UUID_PREFIX_CREDIT_GRANT_APPLICATION),
+				SubscriptionID:    sub.ID,
+				PeriodStart:       tt.cgaPeriodStart,
+				ApplicationReason: tt.reason,
+			}
+
+			got, err := s.creditGrantService.ShouldGateApplicationOnPayment(ctx, sub, cga)
+			s.NoError(err)
+			s.Equal(tt.want, got)
+		})
+	}
 }

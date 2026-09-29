@@ -8,6 +8,7 @@ import (
 	"github.com/flexprice/flexprice/internal/api/dto"
 	"github.com/flexprice/flexprice/internal/domain/creditgrant"
 	domainCreditGrantApplication "github.com/flexprice/flexprice/internal/domain/creditgrantapplication"
+	"github.com/flexprice/flexprice/internal/domain/invoice"
 	"github.com/flexprice/flexprice/internal/domain/proration"
 	"github.com/flexprice/flexprice/internal/domain/subscription"
 	ierr "github.com/flexprice/flexprice/internal/errors"
@@ -69,6 +70,10 @@ type CreditGrantService interface {
 
 	// ListCreditGrantApplications retrieves credit grant applications based on filter
 	ListCreditGrantApplications(ctx context.Context, filter *types.CreditGrantApplicationFilter) (*dto.ListCreditGrantApplicationsResponse, error)
+
+	// ShouldGateApplicationOnPayment reports whether a recurring CGA must wait for the renewal invoice
+	// that precedes its period to be paid.
+	ShouldGateApplicationOnPayment(ctx context.Context, sub *subscription.Subscription, cga *domainCreditGrantApplication.CreditGrantApplication) (bool, error)
 }
 
 type creditGrantService struct {
@@ -1005,8 +1010,8 @@ func (s *creditGrantService) processScheduledApplication(
 
 	// Apply the grant
 	// Check subscription state
-	stateHandler := NewSubscriptionStateHandler(subscription.Subscription, creditGrant.CreditGrant)
-	action, err := stateHandler.DetermineCreditGrantAction()
+	stateHandler := NewSubscriptionStateHandler(subscription.Subscription, creditGrant.CreditGrant, cga, s)
+	action, err := stateHandler.DetermineCreditGrantAction(ctx)
 
 	if err != nil {
 		s.Logger.Error(ctx, "Failed to determine action", "application_id", cga.ID, "error", err)
@@ -1548,4 +1553,46 @@ func (s *creditGrantService) ListCreditGrantApplications(ctx context.Context, fi
 	)
 
 	return response, nil
+}
+
+func (s *creditGrantService) ShouldGateApplicationOnPayment(
+	ctx context.Context,
+	sub *subscription.Subscription,
+	cga *domainCreditGrantApplication.CreditGrantApplication,
+) (bool, error) {
+	if !types.PaymentBehavior(sub.PaymentBehavior).IsIncompleteType() ||
+		cga.ApplicationReason != types.ApplicationReasonRecurringCreditGrant {
+		return false, nil
+	}
+
+	if !sub.CurrentPeriodEnd.After(cga.PeriodStart) {
+		return true, nil
+	}
+
+	filter := types.NewNoLimitInvoiceFilter()
+	filter.SubscriptionID = sub.ID
+	filter.BillingReason = types.InvoiceBillingReasonSubscriptionCycle
+	filter.PeriodEndLTE = lo.ToPtr(cga.PeriodStart)
+	filter.InvoiceStatus = []types.InvoiceStatus{
+		types.InvoiceStatusDraft,
+		types.InvoiceStatusFinalized,
+		types.InvoiceStatusSkipped,
+	}
+	filter.SkipLineItems = true
+
+	invoices, err := s.InvoiceRepo.List(ctx, filter)
+	if err != nil {
+		return false, err
+	}
+	if len(invoices) == 0 {
+		return false, nil
+	}
+
+	latest := lo.MaxBy(invoices, func(a, b *invoice.Invoice) bool {
+		return lo.FromPtr(a.PeriodEnd).After(lo.FromPtr(b.PeriodEnd))
+	})
+	paid := latest.InvoiceStatus == types.InvoiceStatusSkipped ||
+		latest.PaymentStatus == types.PaymentStatusSucceeded ||
+		latest.PaymentStatus == types.PaymentStatusOverpaid
+	return !paid, nil
 }

@@ -147,6 +147,13 @@ func (p PaymentBehavior) String() string {
 	return string(p)
 }
 
+// IsIncompleteType reports whether the behavior gates the subscription on invoice payment.
+func (p PaymentBehavior) IsIncompleteType() bool {
+	return p == PaymentBehaviorAllowIncomplete ||
+		p == PaymentBehaviorDefaultIncomplete ||
+		p == PaymentBehaviorErrorIfIncomplete
+}
+
 func (p PaymentBehavior) Validate() error {
 	allowed := []PaymentBehavior{
 		PaymentBehaviorAllowIncomplete,

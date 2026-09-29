@@ -155,7 +155,7 @@ func validateInvoiceIsPayable(inv *dto.InvoiceResponse) error {
 // subscription left behind.
 //
 // Deliberately narrow. An already-active subscription makes that hook a no-op
-// (ActivateIncompleteSubscription returns early unless the status is incomplete),
+// (activateIncompleteSubscription returns early unless the status is incomplete),
 // so those invoices stay payable, as do renewals and one-off invoices.
 //
 // TODO: delete once ReconcileInvoicePayment delegates to ReconcilePaymentStatus.

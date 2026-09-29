@@ -1213,6 +1213,15 @@ func (s *invoiceService) performFinalizeInvoiceActions(ctx context.Context, inv 
 
 	notifyInvoiceFinalized(ctx, s.ServiceParams, inv.ID)
 
+	if inv.PaymentStatus == types.PaymentStatusSucceeded &&
+		inv.BillingReason == string(types.InvoiceBillingReasonSubscriptionCycle) {
+		if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
+			s.Logger.Error(ctx, "failed to handle subscription invoice payment",
+				"invoice_id", inv.ID,
+				"error", err)
+		}
+	}
+
 	return nil
 }
 
@@ -2049,6 +2058,14 @@ func (s *invoiceService) UpdatePaymentStatus(ctx context.Context, id string, sta
 		}
 	}
 
+	if status == types.PaymentStatusSucceeded {
+		if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
+			s.Logger.Error(ctx, "failed to handle subscription invoice payment",
+				"invoice_id", inv.ID,
+				"error", err)
+		}
+	}
+
 	// Invoice is fully paid — dispatch mark-paid to whichever providers are connected.
 	if status == types.PaymentStatusSucceeded {
 		paymentProcessorService := NewPaymentProcessorService(s.ServiceParams)
@@ -2122,12 +2139,6 @@ func (s *invoiceService) ReconcilePaymentStatus(ctx context.Context, id string, 
 
 		inv.PaidAt = &now
 
-		if types.InvoiceBillingReason(inv.BillingReason).IsFirstSubscriptionOpenInvoiceReason() {
-			if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
-				return err
-			}
-		}
-
 	case types.PaymentStatusOverpaid:
 		// Handle additional payments to an already overpaid invoice
 		if amount != nil {
@@ -2138,11 +2149,6 @@ func (s *invoiceService) ReconcilePaymentStatus(ctx context.Context, id string, 
 		// Status remains OVERPAID
 		if inv.PaidAt == nil {
 			inv.PaidAt = &now
-		}
-		if types.InvoiceBillingReason(inv.BillingReason).IsFirstSubscriptionOpenInvoiceReason() {
-			if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
-				return err
-			}
 		}
 	case types.PaymentStatusFailed:
 		// Don't change amount_paid for failed payments
@@ -2156,6 +2162,14 @@ func (s *invoiceService) ReconcilePaymentStatus(ctx context.Context, id string, 
 
 	if err := s.InvoiceRepo.Update(ctx, inv); err != nil {
 		return err
+	}
+
+	if status == types.PaymentStatusSucceeded || status == types.PaymentStatusOverpaid {
+		if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
+			s.Logger.Error(ctx, "failed to handle subscription invoice payment",
+				"invoice_id", inv.ID,
+				"error", err)
+		}
 	}
 
 	// Check if this invoice is for a purchased credit (has wallet_transaction_id in metadata)
@@ -4241,15 +4255,11 @@ func (s *invoiceService) TriggerWebhook(ctx context.Context, invoiceID string, e
 	return nil
 }
 
-// HandleIncompleteSubscriptionPayment runs subscription activation / trial conversion when a qualifying
-// invoice is fully paid (SUBSCRIPTION_CREATE or SUBSCRIPTION_TRIAL_END).
+// HandleIncompleteSubscriptionPayment runs subscription activation / trial conversion / renewal gating
+// when a subscription invoice is fully paid.
 func (s *invoiceService) HandleIncompleteSubscriptionPayment(ctx context.Context, invoice *invoice.Invoice) error {
 	// Only process subscription invoices that are fully paid
 	if invoice.SubscriptionID == nil || !invoice.AmountRemaining.IsZero() {
-		return nil
-	}
-
-	if !types.InvoiceBillingReason(invoice.BillingReason).IsFirstSubscriptionOpenInvoiceReason() {
 		return nil
 	}
 

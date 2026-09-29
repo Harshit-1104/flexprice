@@ -964,6 +964,22 @@ func (p *paymentProcessor) handleCardPayment(ctx context.Context, paymentObj *pa
 			Mark(ierr.ErrSystem)
 	}
 
+	if paymentObj.DestinationType == types.PaymentDestinationTypeInvoice {
+		settled, err := stripeIntegration.InvoiceSyncSvc.IsStripeInvoiceSettled(ctx, paymentObj.DestinationID)
+		if err != nil {
+			return err
+		}
+		if settled {
+			return ierr.NewError("invoice is already settled in Stripe").
+				WithHint("This invoice is already paid or voided in Stripe; it will be reconciled from Stripe instead of charging again.").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id": paymentObj.ID,
+					"invoice_id": paymentObj.DestinationID,
+				}).
+				Mark(ierr.ErrInvalidOperation)
+		}
+	}
+
 	// If no specific payment method ID is provided, we need to get one
 	if paymentObj.PaymentMethodID == "" {
 		// Get the default payment method - this is required for card payments
@@ -1062,15 +1078,11 @@ func (p *paymentProcessor) handleCardPayment(ctx context.Context, paymentObj *pa
 	return nil
 }
 
-// handleIncompleteSubscriptionPayment runs subscription activation / trial conversion when a qualifying
-// invoice is fully paid (SUBSCRIPTION_CREATE or SUBSCRIPTION_TRIAL_END).
+// handleIncompleteSubscriptionPayment runs subscription activation / trial conversion / renewal gating
+// when a subscription invoice is fully paid.
 func (p *paymentProcessor) handleIncompleteSubscriptionPayment(ctx context.Context, invoice *invoice.Invoice) error {
 	// Only process subscription invoices that are fully paid
 	if invoice.SubscriptionID == nil || !invoice.AmountRemaining.IsZero() {
-		return nil
-	}
-
-	if !types.InvoiceBillingReason(invoice.BillingReason).IsFirstSubscriptionOpenInvoiceReason() {
 		return nil
 	}
 

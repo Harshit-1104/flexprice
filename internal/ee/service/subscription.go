@@ -5523,21 +5523,11 @@ func (s *subscriptionService) buildAddonProrationEntries(
 	return entries, nil
 }
 
-// ActivateIncompleteSubscription activates a subscription that is in incomplete status
-// after the first invoice has been successfully paid
-func (s *subscriptionService) ActivateIncompleteSubscription(ctx context.Context, subscriptionID string) error {
+// activateIncompleteSubscription activates a subscription that is in incomplete status
+// after its invoice has been successfully paid
+func (s *subscriptionService) activateIncompleteSubscription(ctx context.Context, sub *subscription.Subscription) error {
+	subscriptionID := sub.ID
 	s.Logger.Info(ctx, "activating incomplete subscription", "subscription_id", subscriptionID)
-
-	// Get the subscription
-	sub, err := s.SubRepo.Get(ctx, subscriptionID)
-	if err != nil {
-		return ierr.WithError(err).
-			WithHint("Failed to get subscription").
-			WithReportableDetails(map[string]interface{}{
-				"subscription_id": subscriptionID,
-			}).
-			Mark(ierr.ErrDatabase)
-	}
 
 	// Check if subscription is in incomplete status
 	if sub.SubscriptionStatus != types.SubscriptionStatusIncomplete {
@@ -5549,7 +5539,7 @@ func (s *subscriptionService) ActivateIncompleteSubscription(ctx context.Context
 	sub.SubscriptionStatus = types.SubscriptionStatusActive
 
 	// Update the subscription in database
-	err = s.SubRepo.Update(ctx, sub)
+	err := s.SubRepo.Update(ctx, sub)
 	if err != nil {
 		return ierr.WithError(err).
 			WithHint("Failed to update subscription status").
@@ -5584,34 +5574,37 @@ func (s *subscriptionService) ActivateIncompleteSubscription(ctx context.Context
 }
 
 // HandleSubscriptionActivatingInvoicePaid completes subscription lifecycle when an activating invoice
-// (subscription create or trial-end conversion) is fully paid.
+// (subscription create or trial-end conversion) or a payment-gated renewal invoice is fully paid.
 func (s *subscriptionService) HandleSubscriptionActivatingInvoicePaid(ctx context.Context, inv *invoice.Invoice) error {
 	if inv == nil || inv.SubscriptionID == nil {
 		return nil
 	}
 	reason := types.InvoiceBillingReason(inv.BillingReason)
-	if !reason.IsFirstSubscriptionOpenInvoiceReason() {
+	if !reason.IsFirstSubscriptionOpenInvoiceReason() && reason != types.InvoiceBillingReasonSubscriptionCycle {
 		return nil
 	}
-	switch reason {
-	case types.InvoiceBillingReasonSubscriptionCreate, types.InvoiceBillingReasonSubscriptionUpdate:
-		return s.ActivateIncompleteSubscription(ctx, lo.FromPtr(inv.SubscriptionID))
-	case types.InvoiceBillingReasonSubscriptionTrialEnd:
-		sub, err := s.SubRepo.Get(ctx, lo.FromPtr(inv.SubscriptionID))
-		if err != nil {
-			return err
-		}
+
+	sub, err := s.SubRepo.Get(ctx, lo.FromPtr(inv.SubscriptionID))
+	if err != nil {
+		return err
+	}
+
+	if reason == types.InvoiceBillingReasonSubscriptionTrialEnd {
 		return s.completeTrialConversionToActive(ctx, sub)
-	default:
-		return nil
 	}
+
+	if sub.SubscriptionStatus == types.SubscriptionStatusIncomplete {
+		return s.activateIncompleteSubscription(ctx, sub)
+	}
+	
+	return s.processPendingCreditGrantsForSubscription(ctx, sub)
 }
 
 // completeTrialConversionToActive activates a subscription after its trial-end invoice is paid or
 // skipped (zero-amount). By the time this is called, processSubscriptionTrialEnd has already
 // advanced CurrentPeriodStart/End to the first real billing window, so only the status changes.
 func (s *subscriptionService) completeTrialConversionToActive(ctx context.Context, sub *subscription.Subscription) error {
-	if sub.SubscriptionStatus == types.SubscriptionStatusActive {
+	if sub.SubscriptionStatus == types.SubscriptionStatusActive || sub.SubscriptionStatus == types.SubscriptionStatusCancelled {
 		return nil
 	}
 	sub.SubscriptionStatus = types.SubscriptionStatusActive
@@ -5668,7 +5661,12 @@ func (s *subscriptionService) processPendingCreditGrantsForSubscription(ctx cont
 	// Process each application
 	successCount := 0
 	failureCount := 0
+	now := time.Now().UTC()
 	for _, cga := range applications {
+		if cga.PeriodStart.After(now) {
+			continue
+		}
+
 		// Get the credit grant
 		creditGrant, err := creditGrantService.GetCreditGrant(ctx, cga.CreditGrantID)
 		if err != nil {
@@ -5681,8 +5679,8 @@ func (s *subscriptionService) processPendingCreditGrantsForSubscription(ctx cont
 		}
 
 		// Check subscription state and determine action
-		stateHandler := NewSubscriptionStateHandler(sub, creditGrant.CreditGrant)
-		action, err := stateHandler.DetermineCreditGrantAction()
+		stateHandler := NewSubscriptionStateHandler(sub, creditGrant.CreditGrant, cga, creditGrantService)
+		action, err := stateHandler.DetermineCreditGrantAction(ctx)
 		if err != nil {
 			s.Logger.Error(ctx, "failed to determine credit grant action",
 				"application_id", cga.ID,
