@@ -14,6 +14,62 @@ Payment gating (`allow_incomplete`, `default_incomplete`) only applies when a su
 
 ## 2. How the flow will work
 
+### Flow diagrams
+
+**New subscription**
+
+```mermaid
+flowchart TD
+    A["Subscription created<br/>status: incomplete, invoice raised"] --> B["Stripe outbound: no payment attempt by Flexprice<br/>Stripe auto charges or customer pays on hosted URL"]
+    B --> C{"Invoice paid?"}
+    C -- yes --> D["Shared invoice-paid handler<br/>incomplete → active<br/>process pending CGAs, EGs on"]
+    C -- "no / charge failed" --> E["Stays incomplete<br/>failed payment recorded (new)<br/>period frozen, CGs deferred, EGs off"]
+    E -. "paid later" .-> D
+    E --> F["Overdue handling"]
+```
+
+**Renewal**
+
+```mermaid
+flowchart TD
+    subgraph CGA["CGA cron (every 15 min, from cga.PeriodStart)"]
+        C1{"Incomplete-type<br/>payment behaviour?"}
+        C1 -- no --> CA["Apply"]
+        C1 -- yes --> C2{"Period rolled?<br/>sub.CurrentPeriodStart ≥ cga.PeriodStart"}
+        C2 -- no --> CD["Defer<br/>backoff 30m → 8h"]
+        C2 -- yes --> C3{"Boundary invoice<br/>period_end = cga.PeriodStart"}
+        C3 -- "none (zero amount)" --> CA
+        C3 -- "draft / finalized unpaid" --> CD
+        C3 -- paid --> CA
+        CD -. retry .-> C1
+    end
+
+    subgraph BILL["Renewal billing (active subscriptions only)"]
+        R1["Create draft invoice<br/>roll period over"] --> R2["Compute<br/>zero amount → skipped"]
+        R2 --> R3["Finalize<br/>due = period_end + payment terms"]
+        R3 --> R4["Stripe outbound sync<br/>charge_automatically / send_invoice"]
+        R4 --> R5{"Stripe payment"}
+        R5 -- success --> R6["Webhook: payment record<br/>shared invoice-paid handler<br/>incomplete → active"]
+        R5 -- failure --> R7["Failed payment record (new)<br/>allow / error_if_incomplete → incomplete"]
+        R7 -. "Stripe retry succeeds" .-> R6
+        R7 --> OD["Overdue handling"]
+    end
+
+    R6 -. "process pending CGAs immediately" .-> C1
+```
+
+**Overdue handling** (15 min auto-cancellation workflow, per unpaid invoice)
+
+```mermaid
+flowchart LR
+    S["Unpaid invoice"] --> T{"now vs due date"}
+    T -- "now < due" --> A1["active<br/>CGs held, EGs on"]
+    T -- "due ≤ now ≤ due + grace" --> A2["incomplete (incomplete-type behaviours)<br/>CGs held, EGs off"]
+    T -- "now > due + grace" --> A3["Void invoice on Stripe (open question)<br/>void in Flexprice<br/>cancel subscription and CGAs"]
+    A1 -- paid --> P["active<br/>CGs applied, EGs on"]
+    A2 -- paid --> P
+```
+
 #### New subscription
 
 - Invoice is raised and subscription created with **incomplete status**.
