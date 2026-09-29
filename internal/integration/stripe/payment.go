@@ -1223,17 +1223,13 @@ func (s *PaymentService) AttachPaymentToStripeInvoice(ctx context.Context, strip
 	return nil
 }
 
-// PaymentExistsByGatewayPaymentID checks if a payment already exists with the given gateway payment ID
+// PaymentExistsByGatewayPaymentID checks if a non-failed payment already exists with the given gateway payment ID
 func (s *PaymentService) PaymentExistsByGatewayPaymentID(ctx context.Context, gatewayPaymentID string) (bool, error) {
 	if gatewayPaymentID == "" {
 		return false, nil
 	}
 
 	filter := types.NewNoLimitPaymentFilter()
-	if filter.QueryFilter != nil {
-		limit := 1
-		filter.QueryFilter.Limit = &limit
-	}
 	filter.GatewayPaymentID = &gatewayPaymentID
 
 	payments, err := s.paymentRepo.List(ctx, filter)
@@ -1243,7 +1239,7 @@ func (s *PaymentService) PaymentExistsByGatewayPaymentID(ctx context.Context, ga
 
 	// Check if any payment has matching gateway_payment_id
 	for _, p := range payments {
-		if p.GatewayPaymentID != nil && *p.GatewayPaymentID == gatewayPaymentID {
+		if p.GatewayPaymentID != nil && *p.GatewayPaymentID == gatewayPaymentID && p.PaymentStatus != types.PaymentStatusFailed {
 			return true, nil
 		}
 	}
@@ -1642,7 +1638,7 @@ func (s *PaymentService) HandleExternalStripePaymentFromWebhook(ctx context.Cont
 // ProcessExternalStripePayment processes a payment that was made directly in Stripe (external to FlexPrice)
 func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, paymentIntent *stripe.PaymentIntent, stripeInvoiceID string, paymentService interfaces.PaymentService, invoiceService interfaces.InvoiceService) error {
 	// Get FlexPrice invoice ID from Stripe invoice
-	flexpriceInvoiceID, err := s.getFlexPriceInvoiceID(ctx, stripeInvoiceID)
+	flexpriceInvoiceID, err := s.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoiceID)
 	if err != nil {
 		s.logger.Error(ctx, "failed to get FlexPrice invoice ID",
 			"error", err,
@@ -1651,7 +1647,7 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 	}
 
 	// Create external payment record
-	err = s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, paymentService)
+	err = s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusSucceeded, paymentService)
 	if err != nil {
 		s.logger.Error(ctx, "failed to create external payment record",
 			"error", err,
@@ -1673,13 +1669,59 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 	return nil
 }
 
-// getFlexPriceInvoiceID gets the FlexPrice invoice ID from a Stripe invoice ID
-func (s *PaymentService) getFlexPriceInvoiceID(ctx context.Context, stripeInvoiceID string) (string, error) {
-	return s.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoiceID)
+// RecordFailedStripeInvoicePayment upserts a FAILED payment for a failed attempt on a synced Stripe invoice, one row per payment intent.
+func (s *PaymentService) RecordFailedStripeInvoicePayment(ctx context.Context, paymentIntent *stripe.PaymentIntent, stripeInvoiceID string, paymentService interfaces.PaymentService) error {
+	flexpriceInvoiceID, err := s.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoiceID)
+	if err != nil {
+		return err
+	}
+	
+	return s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, paymentService)
+}
+
+// ReconcileStripeInvoicePaidWithoutPaymentIntent marks the FlexPrice invoice paid when Stripe settled it without a
+// payment intent (customer balance, credit notes, out of band). No-op if the invoice is already paid.
+func (s *PaymentService) ReconcileStripeInvoicePaidWithoutPaymentIntent(ctx context.Context, stripeInvoiceID string, invoiceService interfaces.InvoiceService) error {
+	flexpriceInvoiceID, err := s.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoiceID)
+	if err != nil {
+		return err
+	}
+
+	invoiceResp, err := invoiceService.GetInvoice(ctx, flexpriceInvoiceID)
+	if err != nil {
+		return err
+	}
+	if invoiceResp.PaymentStatus == types.PaymentStatusSucceeded || invoiceResp.PaymentStatus == types.PaymentStatusOverpaid {
+		return nil
+	}
+
+	return s.reconcileInvoiceWithExternalPayment(ctx, flexpriceInvoiceID, invoiceResp.AmountRemaining, invoiceService)
+}
+
+// GetStripeInvoicePaymentIntentID returns the payment intent of the Stripe invoice's payment in the given status
+// ("open" or "paid"), or "" if there is none.
+func (s *PaymentService) GetStripeInvoicePaymentIntentID(ctx context.Context, stripeInvoiceID, status string) (string, error) {
+	stripeClient, _, err := s.client.GetStripeClient(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	params := &stripe.InvoicePaymentListParams{Invoice: stripe.String(stripeInvoiceID), Status: stripe.String(status)}
+	for invoicePayment, err := range stripeClient.V1InvoicePayments.List(ctx, params) {
+		if err != nil {
+			return "", ierr.WithError(err).
+				WithHint("Unable to list invoice payments from Stripe").
+				Mark(ierr.ErrSystem)
+		}
+		if invoicePayment.Payment != nil && invoicePayment.Payment.PaymentIntent != nil {
+			return invoicePayment.Payment.PaymentIntent.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // createExternalPaymentRecord creates a payment record for an external Stripe payment
-func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, paymentService interfaces.PaymentService) error {
+func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, status types.PaymentStatus, paymentService interfaces.PaymentService) error {
 	// Convert amount from cents to decimal
 	amount := decimal.NewFromInt(paymentIntent.Amount).Div(decimal.NewFromInt(100))
 
@@ -1705,6 +1747,11 @@ func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymen
 		createReq.Metadata["stripe_customer_id"] = paymentIntent.Customer.ID
 	}
 
+	// Keyed on the payment intent so retried failures update one row and a later success gets its own.
+	if status == types.PaymentStatusFailed {
+		createReq.IdempotencyKey = "stripe_failed_" + paymentIntent.ID
+	}
+
 	// Add Stripe payment method ID (required for CARD payments)
 	if paymentIntent.PaymentMethod != nil {
 		createReq.PaymentMethodID = paymentIntent.PaymentMethod.ID
@@ -1719,13 +1766,22 @@ func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymen
 		return err
 	}
 
-	// Update payment to succeeded status with all Stripe details (same as regular Stripe charge)
+	// Update payment to the final status with all Stripe details (same as regular Stripe charge)
 	now := time.Now().UTC()
 	updateReq := dto.UpdatePaymentRequest{
-		PaymentStatus:    lo.ToPtr(string(types.PaymentStatusSucceeded)),
+		PaymentStatus:    lo.ToPtr(string(status)),
 		GatewayPaymentID: lo.ToPtr(paymentIntent.ID),
 		PaymentGateway:   lo.ToPtr(string(types.PaymentGatewayTypeStripe)),
-		SucceededAt:      lo.ToPtr(now),
+	}
+	if status == types.PaymentStatusFailed {
+		errorMsg := "Payment failed"
+		if paymentIntent.LastPaymentError != nil && paymentIntent.LastPaymentError.Msg != "" {
+			errorMsg = paymentIntent.LastPaymentError.Msg
+		}
+		updateReq.FailedAt = lo.ToPtr(now)
+		updateReq.ErrorMessage = lo.ToPtr(errorMsg)
+	} else {
+		updateReq.SucceededAt = lo.ToPtr(now)
 	}
 
 	// Add payment method ID if available
@@ -1744,6 +1800,7 @@ func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymen
 
 	s.logger.Info(ctx, "successfully created external payment record",
 		"payment_id", paymentResp.ID,
+		"payment_status", status,
 		"payment_intent_id", paymentIntent.ID,
 		"invoice_id", invoiceID,
 		"amount", amount)

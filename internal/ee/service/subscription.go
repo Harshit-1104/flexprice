@@ -5596,7 +5596,7 @@ func (s *subscriptionService) HandleSubscriptionActivatingInvoicePaid(ctx contex
 	if sub.SubscriptionStatus == types.SubscriptionStatusIncomplete {
 		return s.activateIncompleteSubscription(ctx, sub)
 	}
-	
+
 	return s.processPendingCreditGrantsForSubscription(ctx, sub)
 }
 

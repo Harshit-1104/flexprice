@@ -76,6 +76,10 @@ func (h *Handler) HandleWebhookEvent(ctx context.Context, event *stripeapi.Event
 		return h.handleSetupIntentSucceeded(ctx, event, environmentID, services)
 	case string(types.WebhookEventTypeInvoicePaymentPaid):
 		return h.handleInvoicePaymentPaid(ctx, event, environmentID, services)
+	case string(types.WebhookEventTypeInvoicePaymentFailed):
+		return h.handleInvoicePaymentFailed(ctx, event, environmentID, services)
+	case string(types.WebhookEventTypeInvoicePaid):
+		return h.handleInvoicePaid(ctx, event, environmentID, services)
 	case string(types.WebhookEventTypeProductCreated):
 		return h.handleProductCreated(ctx, event, environmentID, services)
 	case string(types.WebhookEventTypeProductUpdated):
@@ -521,6 +525,96 @@ func (h *Handler) handleInvoicePaymentPaid(ctx context.Context, event *stripeapi
 		"stripe_invoice_id", stripeInvoiceID)
 
 	return nil
+}
+
+// handleInvoicePaymentFailed records a FAILED payment for a failed attempt on a synced Stripe invoice
+func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripeapi.Event, environmentID string, services *ServiceDependencies) error {
+	stripeInvoice := h.parseOutboundInvoiceEvent(ctx, event, environmentID)
+	if stripeInvoice == nil {
+		return nil
+	}
+
+	paymentIntentID, err := h.paymentSvc.GetStripeInvoicePaymentIntentID(ctx, stripeInvoice.ID, "open")
+	if err != nil || paymentIntentID == "" {
+		h.logger.Info(ctx, "no open payment intent for failed Stripe invoice, skipping event",
+			"error", err,
+			"stripe_invoice_id", stripeInvoice.ID,
+			"event_id", event.ID)
+		return nil
+	}
+
+	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID, environmentID)
+	if err != nil {
+		h.logger.Error(ctx, "failed to get payment intent from Stripe, skipping event",
+			"error", err,
+			"payment_intent_id", paymentIntentID,
+			"event_id", event.ID)
+		return nil
+	}
+
+	if err := h.paymentSvc.RecordFailedStripeInvoicePayment(ctx, paymentIntent, stripeInvoice.ID, services.PaymentService); err != nil {
+		h.logger.Error(ctx, "failed to record failed Stripe invoice payment, skipping event",
+			"error", err,
+			"payment_intent_id", paymentIntentID,
+			"stripe_invoice_id", stripeInvoice.ID,
+			"event_id", event.ID)
+	}
+	return nil
+}
+
+// handleInvoicePaid reconciles Stripe invoices settled without a payment intent; payment intents are handled by invoice_payment.paid
+func (h *Handler) handleInvoicePaid(ctx context.Context, event *stripeapi.Event, environmentID string, services *ServiceDependencies) error {
+	stripeInvoice := h.parseOutboundInvoiceEvent(ctx, event, environmentID)
+	if stripeInvoice == nil {
+		return nil
+	}
+
+	paymentIntentID, err := h.paymentSvc.GetStripeInvoicePaymentIntentID(ctx, stripeInvoice.ID, "paid")
+	if err != nil {
+		h.logger.Error(ctx, "failed to list Stripe invoice payments, skipping event",
+			"error", err,
+			"stripe_invoice_id", stripeInvoice.ID,
+			"event_id", event.ID)
+		return nil
+	}
+	if paymentIntentID != "" {
+		return nil
+	}
+
+	if err := h.paymentSvc.ReconcileStripeInvoicePaidWithoutPaymentIntent(ctx, stripeInvoice.ID, services.InvoiceService); err != nil {
+		h.logger.Error(ctx, "failed to reconcile Stripe invoice paid without payment intent, skipping event",
+			"error", err,
+			"stripe_invoice_id", stripeInvoice.ID,
+			"event_id", event.ID)
+	}
+	return nil
+}
+
+// parseOutboundInvoiceEvent returns the Stripe invoice from the event, or nil when invoice outbound sync is off or the payload is invalid
+func (h *Handler) parseOutboundInvoiceEvent(ctx context.Context, event *stripeapi.Event, environmentID string) *stripeapi.Invoice {
+	conn, err := h.getConnection(ctx)
+	if err != nil {
+		h.logger.Error(ctx, "failed to get connection for sync config check, skipping event",
+			"error", err,
+			"environment_id", environmentID,
+			"event_id", event.ID)
+		return nil
+	}
+	if !conn.IsInvoiceOutboundEnabled() {
+		return nil
+	}
+
+	var stripeInvoice stripeapi.Invoice
+	if err := json.Unmarshal(event.Data.Raw, &stripeInvoice); err != nil || stripeInvoice.ID == "" {
+		h.logger.Error(ctx, "failed to parse invoice from webhook, skipping event", "error", err, "event_id", event.ID)
+		return nil
+	}
+
+	h.logger.Info(ctx, "processing Stripe invoice webhook",
+		"event_type", event.Type,
+		"stripe_invoice_id", stripeInvoice.ID,
+		"event_id", event.ID)
+	return &stripeInvoice
 }
 
 func (h *Handler) handleProductCreated(ctx context.Context, event *stripeapi.Event, environmentID string, services *ServiceDependencies) error {
