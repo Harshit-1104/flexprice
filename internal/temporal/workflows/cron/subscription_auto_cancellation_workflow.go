@@ -9,10 +9,12 @@ import (
 )
 
 const (
-	ActivityProcessAutoCancellation = "ProcessAutoCancellationActivity"
+	ActivityProcessAutoCancellation            = "ProcessAutoCancellationActivity"
+	ActivityProcessOverdueSubscriptionInvoices = "ProcessOverdueSubscriptionInvoicesActivity"
 )
 
-// SubscriptionAutoCancellationWorkflow cancels subscriptions that are past their grace period.
+// SubscriptionAutoCancellationWorkflow cancels subscriptions that are past their grace period
+// and marks subscriptions with overdue renewal invoices incomplete.
 // It is triggered by a Temporal Schedule every 15 minutes.
 func SubscriptionAutoCancellationWorkflow(ctx workflow.Context, _ cronModels.SubscriptionAutoCancellationWorkflowInput) (*cronModels.SubscriptionAutoCancellationWorkflowResult, error) {
 	log := workflow.GetLogger(ctx)
@@ -32,6 +34,11 @@ func SubscriptionAutoCancellationWorkflow(ctx workflow.Context, _ cronModels.Sub
 	var result cronModels.SubscriptionAutoCancellationWorkflowResult
 	if err := workflow.ExecuteActivity(ctx, ActivityProcessAutoCancellation).Get(ctx, &result); err != nil {
 		log.Error("SubscriptionAutoCancellationWorkflow activity failed", "error", err)
+		return nil, err
+	}
+
+	if err := workflow.ExecuteActivity(ctx, ActivityProcessOverdueSubscriptionInvoices).Get(ctx, nil); err != nil {
+		log.Error("SubscriptionAutoCancellationWorkflow overdue activity failed", "error", err)
 		return nil, err
 	}
 

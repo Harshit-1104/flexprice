@@ -27,6 +27,7 @@ import (
 	temporalservice "github.com/flexprice/flexprice/internal/temporal/service"
 
 	"github.com/flexprice/flexprice/internal/types"
+	"github.com/flexprice/flexprice/internal/utils"
 	webhookDto "github.com/flexprice/flexprice/internal/webhook/dto"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
@@ -5598,6 +5599,107 @@ func (s *subscriptionService) HandleSubscriptionActivatingInvoicePaid(ctx contex
 	}
 
 	return s.processPendingCreditGrantsForSubscription(ctx, sub)
+}
+
+// MarkSubscriptionIncomplete moves an active subscription with an incomplete-type payment behaviour to incomplete
+// when its renewal invoice is unpaid after a failed automatic charge or past its due date.
+func (s *subscriptionService) MarkSubscriptionIncomplete(ctx context.Context, invoiceID string) error {
+	inv, err := s.InvoiceRepo.Get(ctx, invoiceID)
+	if err != nil {
+		return err
+	}
+	if inv.SubscriptionID == nil || types.InvoiceBillingReason(inv.BillingReason) != types.InvoiceBillingReasonSubscriptionCycle ||
+		inv.InvoiceStatus != types.InvoiceStatusFinalized || !inv.AmountRemaining.IsPositive() {
+		return nil
+	}
+
+	sub, err := s.SubRepo.Get(ctx, lo.FromPtr(inv.SubscriptionID))
+	if err != nil {
+		return err
+	}
+	if sub.SubscriptionStatus != types.SubscriptionStatusActive || !types.PaymentBehavior(sub.PaymentBehavior).IsIncompleteType() {
+		return nil
+	}
+	isOverdue := inv.DueDate != nil && !time.Now().UTC().Before(*inv.DueDate)
+	if types.CollectionMethod(sub.CollectionMethod) != types.CollectionMethodChargeAutomatically && !isOverdue {
+		return nil
+	}
+
+	sub.SubscriptionStatus = types.SubscriptionStatusIncomplete
+	if err := s.SubRepo.Update(ctx, sub); err != nil {
+		return err
+	}
+
+	s.Logger.Info(ctx, "marked subscription incomplete for unpaid renewal invoice",
+		"subscription_id", sub.ID,
+		"invoice_id", inv.ID,
+		"is_overdue", isOverdue)
+	s.publishSystemEvent(ctx, types.WebhookEventSubscriptionUpdated, sub.ID)
+	return nil
+}
+
+func (s *subscriptionService) ProcessOverdueSubscriptionInvoices(ctx context.Context) error {
+	defaultConfig, err := getDefaultValue[types.SubscriptionConfig](types.SettingKeySubscriptionConfig)
+	if err != nil {
+		return err
+	}
+	configs, err := s.SettingsRepo.ListAllTenantEnvSettingsByKey(ctx, types.SettingKeySubscriptionConfig)
+	if err != nil {
+		s.Logger.Error(ctx, "failed to list subscription configs for overdue processing", "error", err)
+		return err
+	}
+
+	graceDays := make(map[string]int, len(configs))
+	maxGraceDays := defaultConfig.GracePeriodDays
+	for _, c := range configs {
+		config, err := utils.ToStruct[types.SubscriptionConfig](c.Config)
+		if err != nil || config.GracePeriodDays <= 0 {
+			continue
+		}
+		graceDays[c.TenantID+"/"+c.EnvironmentID] = config.GracePeriodDays
+		maxGraceDays = max(maxGraceDays, config.GracePeriodDays)
+	}
+
+	now := time.Now().UTC()
+	invoices, err := s.InvoiceRepo.ListAllTenant(ctx, &types.InvoiceFilter{
+		InvoiceType:       types.InvoiceTypeSubscription,
+		InvoiceStatus:     []types.InvoiceStatus{types.InvoiceStatusFinalized},
+		PaymentStatus:     []types.PaymentStatus{types.PaymentStatusFailed, types.PaymentStatusPending},
+		BillingReason:     types.InvoiceBillingReasonSubscriptionCycle,
+		AmountRemainingGt: lo.ToPtr(decimal.Zero),
+		SkipLineItems:     true,
+		QueryFilter:       types.NewNoLimitQueryFilter(),
+		Filters: []*types.FilterCondition{{
+			Field:    lo.ToPtr("due_date"),
+			Operator: lo.ToPtr(types.AFTER),
+			DataType: lo.ToPtr(types.DataTypeDate),
+			Value:    &types.Value{Date: lo.ToPtr(now.AddDate(0, 0, -maxGraceDays))},
+		}},
+	})
+	if err != nil {
+		s.Logger.Error(ctx, "failed to list unpaid renewal invoices for overdue processing", "error", err)
+		return err
+	}
+
+	// Past grace is left to auto-cancellation; the upper bound also keeps old unpaid invoices from flipping subscriptions.
+	for _, inv := range invoices {
+		grace := lo.ValueOr(graceDays, inv.TenantID+"/"+inv.EnvironmentID, defaultConfig.GracePeriodDays)
+		if inv.DueDate == nil || now.Before(*inv.DueDate) || now.After(inv.DueDate.AddDate(0, 0, grace)) {
+			continue
+		}
+
+		tenantCtx := context.WithValue(ctx, types.CtxTenantID, inv.TenantID)
+		tenantCtx = context.WithValue(tenantCtx, types.CtxEnvironmentID, inv.EnvironmentID)
+		if err := s.MarkSubscriptionIncomplete(tenantCtx, inv.ID); err != nil {
+			s.Logger.Error(ctx, "failed to mark subscription incomplete for overdue invoice",
+				"error", err,
+				"invoice_id", inv.ID,
+				"tenant_id", inv.TenantID,
+				"environment_id", inv.EnvironmentID)
+		}
+	}
+	
+	return nil
 }
 
 // completeTrialConversionToActive activates a subscription after its trial-end invoice is paid or

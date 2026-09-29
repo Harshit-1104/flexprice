@@ -10593,3 +10593,136 @@ func (s *SubscriptionServiceSuite) TestCreateSubscription_GroupedInvoicingChildr
 	s.Error(err, "expected duplicate price_id in a child's override_line_items to be rejected")
 	s.Contains(err.Error(), "duplicate price_id in override line items")
 }
+
+func (s *SubscriptionServiceSuite) TestMarkSubscriptionIncomplete() {
+	ctx := s.GetContext()
+	now := time.Now().UTC()
+	past, future := now.Add(-time.Hour), now.Add(24*time.Hour)
+
+	tests := []struct {
+		name             string
+		status           types.SubscriptionStatus
+		behavior         types.PaymentBehavior
+		collectionMethod types.CollectionMethod
+		billingReason    types.InvoiceBillingReason
+		amountRemaining  decimal.Decimal
+		dueDate          time.Time
+		want             types.SubscriptionStatus
+	}{
+		{"charge_automatically failure before due", types.SubscriptionStatusActive, types.PaymentBehaviorAllowIncomplete, types.CollectionMethodChargeAutomatically, types.InvoiceBillingReasonSubscriptionCycle, decimal.NewFromInt(10), future, types.SubscriptionStatusIncomplete},
+		{"send_invoice past due", types.SubscriptionStatusActive, types.PaymentBehaviorDefaultIncomplete, types.CollectionMethodSendInvoice, types.InvoiceBillingReasonSubscriptionCycle, decimal.NewFromInt(10), past, types.SubscriptionStatusIncomplete},
+		{"send_invoice not yet due", types.SubscriptionStatusActive, types.PaymentBehaviorDefaultIncomplete, types.CollectionMethodSendInvoice, types.InvoiceBillingReasonSubscriptionCycle, decimal.NewFromInt(10), future, types.SubscriptionStatusActive},
+		{"default_active is never gated", types.SubscriptionStatusActive, types.PaymentBehaviorDefaultActive, types.CollectionMethodChargeAutomatically, types.InvoiceBillingReasonSubscriptionCycle, decimal.NewFromInt(10), past, types.SubscriptionStatusActive},
+		{"paid invoice", types.SubscriptionStatusActive, types.PaymentBehaviorAllowIncomplete, types.CollectionMethodChargeAutomatically, types.InvoiceBillingReasonSubscriptionCycle, decimal.Zero, past, types.SubscriptionStatusActive},
+		{"non-renewal invoice", types.SubscriptionStatusActive, types.PaymentBehaviorAllowIncomplete, types.CollectionMethodChargeAutomatically, types.InvoiceBillingReasonSubscriptionCreate, decimal.NewFromInt(10), past, types.SubscriptionStatusActive},
+		{"cancelled subscription", types.SubscriptionStatusCancelled, types.PaymentBehaviorAllowIncomplete, types.CollectionMethodChargeAutomatically, types.InvoiceBillingReasonSubscriptionCycle, decimal.NewFromInt(10), past, types.SubscriptionStatusCancelled},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			sub := &subscription.Subscription{
+				ID:                 types.GenerateUUIDWithPrefix(types.UUID_PREFIX_SUBSCRIPTION),
+				CustomerID:         s.testData.customer.ID,
+				PlanID:             s.testData.plan.ID,
+				SubscriptionStatus: tt.status,
+				Currency:           "usd",
+				BillingAnchor:      now,
+				BillingCycle:       types.BillingCycleAnniversary,
+				BillingPeriod:      types.BILLING_PERIOD_MONTHLY,
+				BillingPeriodCount: 1,
+				BillingCadence:     types.BILLING_CADENCE_RECURRING,
+				StartDate:          now,
+				CurrentPeriodStart: now,
+				CurrentPeriodEnd:   now.AddDate(0, 1, 0),
+				CollectionMethod:   string(tt.collectionMethod),
+				PaymentBehavior:    string(tt.behavior),
+				BaseModel:          types.GetDefaultBaseModel(ctx),
+			}
+			s.Require().NoError(s.GetStores().SubscriptionRepo.Create(ctx, sub))
+
+			inv := &invoice.Invoice{
+				ID:              types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE),
+				CustomerID:      s.testData.customer.ID,
+				SubscriptionID:  &sub.ID,
+				InvoiceType:     types.InvoiceTypeSubscription,
+				InvoiceStatus:   types.InvoiceStatusFinalized,
+				PaymentStatus:   types.PaymentStatusPending,
+				Currency:        "usd",
+				AmountDue:       tt.amountRemaining,
+				AmountRemaining: tt.amountRemaining,
+				DueDate:         lo.ToPtr(tt.dueDate),
+				BillingReason:   string(tt.billingReason),
+				BaseModel:       types.GetDefaultBaseModel(ctx),
+			}
+			s.Require().NoError(s.GetStores().InvoiceRepo.Create(ctx, inv))
+
+			s.Require().NoError(s.service.MarkSubscriptionIncomplete(ctx, inv.ID))
+
+			updated, err := s.GetStores().SubscriptionRepo.Get(ctx, sub.ID)
+			s.Require().NoError(err)
+			s.Equal(tt.want, updated.SubscriptionStatus)
+		})
+	}
+}
+
+func (s *SubscriptionServiceSuite) TestProcessOverdueSubscriptionInvoices() {
+	ctx := s.GetContext()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name    string
+		dueDate time.Time
+		want    types.SubscriptionStatus
+	}{
+		{"not yet due", now.Add(24 * time.Hour), types.SubscriptionStatusActive},
+		{"within grace", now.Add(-24 * time.Hour), types.SubscriptionStatusIncomplete},
+		{"past grace", now.AddDate(0, 0, -10), types.SubscriptionStatusActive},
+	}
+
+	subIDs := make(map[string]string, len(tests))
+	for _, tt := range tests {
+		sub := &subscription.Subscription{
+			ID:                 types.GenerateUUIDWithPrefix(types.UUID_PREFIX_SUBSCRIPTION),
+			CustomerID:         s.testData.customer.ID,
+			PlanID:             s.testData.plan.ID,
+			SubscriptionStatus: types.SubscriptionStatusActive,
+			Currency:           "usd",
+			BillingAnchor:      now,
+			BillingCycle:       types.BillingCycleAnniversary,
+			BillingPeriod:      types.BILLING_PERIOD_MONTHLY,
+			BillingPeriodCount: 1,
+			BillingCadence:     types.BILLING_CADENCE_RECURRING,
+			StartDate:          now,
+			CurrentPeriodStart: now,
+			CurrentPeriodEnd:   now.AddDate(0, 1, 0),
+			CollectionMethod:   string(types.CollectionMethodSendInvoice),
+			PaymentBehavior:    string(types.PaymentBehaviorDefaultIncomplete),
+			BaseModel:          types.GetDefaultBaseModel(ctx),
+		}
+		s.Require().NoError(s.GetStores().SubscriptionRepo.Create(ctx, sub))
+		subIDs[tt.name] = sub.ID
+
+		s.Require().NoError(s.GetStores().InvoiceRepo.Create(ctx, &invoice.Invoice{
+			ID:              types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE),
+			CustomerID:      s.testData.customer.ID,
+			SubscriptionID:  &sub.ID,
+			InvoiceType:     types.InvoiceTypeSubscription,
+			InvoiceStatus:   types.InvoiceStatusFinalized,
+			PaymentStatus:   types.PaymentStatusPending,
+			Currency:        "usd",
+			AmountDue:       decimal.NewFromInt(10),
+			AmountRemaining: decimal.NewFromInt(10),
+			DueDate:         lo.ToPtr(tt.dueDate),
+			BillingReason:   string(types.InvoiceBillingReasonSubscriptionCycle),
+			BaseModel:       types.GetDefaultBaseModel(ctx),
+		}))
+	}
+
+	s.Require().NoError(s.service.ProcessOverdueSubscriptionInvoices(ctx))
+
+	for _, tt := range tests {
+		updated, err := s.GetStores().SubscriptionRepo.Get(ctx, subIDs[tt.name])
+		s.Require().NoError(err)
+		s.Equal(tt.want, updated.SubscriptionStatus, tt.name)
+	}
+}

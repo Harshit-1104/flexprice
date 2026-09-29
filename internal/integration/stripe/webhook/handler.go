@@ -528,10 +528,26 @@ func (h *Handler) handleInvoicePaymentPaid(ctx context.Context, event *stripeapi
 }
 
 // handleInvoicePaymentFailed records a FAILED payment for a failed attempt on a synced Stripe invoice
+// and moves a payment-gated subscription to incomplete
 func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripeapi.Event, environmentID string, services *ServiceDependencies) error {
 	stripeInvoice := h.parseOutboundInvoiceEvent(ctx, event, environmentID)
 	if stripeInvoice == nil {
 		return nil
+	}
+
+	flexpriceInvoiceID, err := h.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoice.ID)
+	if err != nil {
+		h.logger.Info(ctx, "no FlexPrice invoice for failed Stripe invoice, skipping event",
+			"stripe_invoice_id", stripeInvoice.ID,
+			"event_id", event.ID)
+		return nil
+	}
+
+	if err := services.SubscriptionService.MarkSubscriptionIncomplete(ctx, flexpriceInvoiceID); err != nil {
+		h.logger.Error(ctx, "failed to mark subscription incomplete for failed Stripe invoice",
+			"error", err,
+			"invoice_id", flexpriceInvoiceID,
+			"event_id", event.ID)
 	}
 
 	paymentIntentID, err := h.paymentSvc.GetStripeInvoicePaymentIntentID(ctx, stripeInvoice.ID, "open")
@@ -552,13 +568,14 @@ func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripea
 		return nil
 	}
 
-	if err := h.paymentSvc.RecordFailedStripeInvoicePayment(ctx, paymentIntent, stripeInvoice.ID, services.PaymentService); err != nil {
-		h.logger.Error(ctx, "failed to record failed Stripe invoice payment, skipping event",
+	if err := h.paymentSvc.RecordFailedStripeInvoicePayment(ctx, paymentIntent, flexpriceInvoiceID, services.PaymentService); err != nil {
+		h.logger.Error(ctx, "failed to record failed Stripe invoice payment",
 			"error", err,
 			"payment_intent_id", paymentIntentID,
 			"stripe_invoice_id", stripeInvoice.ID,
 			"event_id", event.ID)
 	}
+
 	return nil
 }
 

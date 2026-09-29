@@ -556,6 +556,7 @@ func buildWorkerConfig(
 		activitiesList = append(activitiesList,
 			cron.creditGrant.ProcessScheduledCreditGrantApplicationsActivity,
 			cron.subscription.ProcessAutoCancellationActivity,
+			cron.subscription.ProcessOverdueSubscriptionInvoicesActivity,
 			cron.walletCreditExpiry.ExpireCreditsActivity,
 			cron.subscription.UpdateBillingPeriodsActivity,
 			cron.subscription.ProcessRenewalDueAlertsActivity,

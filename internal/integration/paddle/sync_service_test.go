@@ -1067,6 +1067,12 @@ func (m *mockSubscriptionService) ListSubscriptionLineItems(ctx context.Context,
 func (m *mockSubscriptionService) ProcessAutoCancellationSubscriptions(ctx context.Context) error {
 	return nil
 }
+func (m *mockSubscriptionService) ProcessOverdueSubscriptionInvoices(ctx context.Context) error {
+	return nil
+}
+func (m *mockSubscriptionService) MarkSubscriptionIncomplete(ctx context.Context, invoiceID string) error {
+	return nil
+}
 func (m *mockSubscriptionService) ProcessSubscriptionRenewalDueAlert(ctx context.Context, _ time.Time) error {
 	return nil
 }

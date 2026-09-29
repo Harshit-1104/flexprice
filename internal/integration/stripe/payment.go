@@ -1670,12 +1670,7 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 }
 
 // RecordFailedStripeInvoicePayment upserts a FAILED payment for a failed attempt on a synced Stripe invoice, one row per payment intent.
-func (s *PaymentService) RecordFailedStripeInvoicePayment(ctx context.Context, paymentIntent *stripe.PaymentIntent, stripeInvoiceID string, paymentService interfaces.PaymentService) error {
-	flexpriceInvoiceID, err := s.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoiceID)
-	if err != nil {
-		return err
-	}
-	
+func (s *PaymentService) RecordFailedStripeInvoicePayment(ctx context.Context, paymentIntent *stripe.PaymentIntent, flexpriceInvoiceID string, paymentService interfaces.PaymentService) error {
 	return s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, paymentService)
 }
 

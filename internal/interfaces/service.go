@@ -130,6 +130,8 @@ type SubscriptionService interface {
 	UpdateSubscription(ctx context.Context, subscriptionID string, req dto.UpdateSubscriptionRequest) (*dto.SubscriptionResponse, error)
 	CancelSubscription(ctx context.Context, subscriptionID string, req *dto.CancelSubscriptionRequest) (*dto.CancelSubscriptionResponse, error)
 	HandleSubscriptionActivatingInvoicePaid(ctx context.Context, inv *invoice.Invoice) error
+	// MarkSubscriptionIncomplete moves an active payment-gated subscription to incomplete when its renewal invoice is unpaid.
+	MarkSubscriptionIncomplete(ctx context.Context, invoiceID string) error
 	ListSubscriptions(ctx context.Context, filter *types.SubscriptionFilter) (*dto.ListSubscriptionsResponse, error)
 	GetSubscriptionsForCustomer(ctx context.Context, externalCustomerID string, expand types.Expand) (*dto.ListSubscriptionsResponse, error)
 
@@ -164,6 +166,8 @@ type SubscriptionService interface {
 
 	// Auto-cancellation methods
 	ProcessAutoCancellationSubscriptions(ctx context.Context) error
+	// ProcessOverdueSubscriptionInvoices marks subscriptions incomplete for renewal invoices within due date + grace.
+	ProcessOverdueSubscriptionInvoices(ctx context.Context) error
 	// Renewal due alert methods
 	ProcessSubscriptionRenewalDueAlert(ctx context.Context, referenceTime time.Time) error
 
