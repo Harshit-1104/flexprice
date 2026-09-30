@@ -1647,7 +1647,7 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 	}
 
 	// Create external payment record
-	err = s.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusSucceeded, paymentService)
+	err = s.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusSucceeded, "", paymentService)
 	if err != nil {
 		s.logger.Error(ctx, "failed to create external payment record",
 			"error", err,
@@ -1711,7 +1711,7 @@ func (s *PaymentService) GetStripeInvoicePaymentIntentID(ctx context.Context, st
 }
 
 // CreateExternalPaymentRecord creates a payment record in the given status for an external Stripe payment
-func (s *PaymentService) CreateExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, status types.PaymentStatus, paymentService interfaces.PaymentService) error {
+func (s *PaymentService) CreateExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, status types.PaymentStatus, eventID string, paymentService interfaces.PaymentService) error {
 	// Convert amount from cents to decimal
 	amount := decimal.NewFromInt(paymentIntent.Amount).Div(decimal.NewFromInt(100))
 
@@ -1737,9 +1737,12 @@ func (s *PaymentService) CreateExternalPaymentRecord(ctx context.Context, paymen
 		createReq.Metadata["stripe_customer_id"] = paymentIntent.Customer.ID
 	}
 
-	// Keyed on the payment intent so retried failures update one row and a later success gets its own.
+	if paymentIntent.LatestCharge != nil {
+		createReq.Metadata["stripe_charge_id"] = paymentIntent.LatestCharge.ID
+	}
+
 	if status == types.PaymentStatusFailed {
-		createReq.IdempotencyKey = "stripe_failed_" + paymentIntent.ID
+		createReq.IdempotencyKey = "stripe_failed_" + eventID
 	}
 
 	// Add Stripe payment method ID (required for CARD payments)

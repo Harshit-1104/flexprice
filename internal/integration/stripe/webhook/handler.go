@@ -571,7 +571,7 @@ func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripea
 		return nil
 	}
 
-	if err := h.paymentSvc.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, services.PaymentService); err != nil {
+	if err := h.paymentSvc.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, event.ID, services.PaymentService); err != nil {
 		h.logger.Error(ctx, "failed to record failed Stripe invoice payment",
 			"error", err,
 			"payment_intent_id", paymentIntentID,

@@ -373,18 +373,19 @@ func TestCreateExternalPaymentRecord(t *testing.T) {
 		wantErrorMsg    string
 	}{
 		{name: "succeeded", status: types.PaymentStatusSucceeded},
-		{name: "failed with decline", status: types.PaymentStatusFailed, lastError: &stripe.Error{Msg: "card declined"}, wantIdempotency: "stripe_failed_pi_1", wantErrorMsg: "card declined"},
-		{name: "failed without error", status: types.PaymentStatusFailed, wantIdempotency: "stripe_failed_pi_1", wantErrorMsg: "Payment failed"},
+		{name: "failed with decline", status: types.PaymentStatusFailed, lastError: &stripe.Error{Msg: "card declined"}, wantIdempotency: "stripe_failed_evt_1", wantErrorMsg: "card declined"},
+		{name: "failed without error", status: types.PaymentStatusFailed, wantIdempotency: "stripe_failed_evt_1", wantErrorMsg: "Payment failed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &PaymentService{logger: logger.NewNoopLogger()}
 			paymentSvc := &externalTestPaymentService{}
-			pi := &stripe.PaymentIntent{ID: "pi_1", Amount: 1000, Currency: "usd", LastPaymentError: tt.lastError}
+			pi := &stripe.PaymentIntent{ID: "pi_1", Amount: 1000, Currency: "usd", LastPaymentError: tt.lastError, LatestCharge: &stripe.Charge{ID: "ch_1"}}
 
-			require.NoError(t, s.CreateExternalPaymentRecord(context.Background(), pi, "inv_1", tt.status, paymentSvc))
+			require.NoError(t, s.CreateExternalPaymentRecord(context.Background(), pi, "inv_1", tt.status, "evt_1", paymentSvc))
 
 			require.Equal(t, tt.wantIdempotency, paymentSvc.createReq.IdempotencyKey)
+			require.Equal(t, "ch_1", paymentSvc.createReq.Metadata["stripe_charge_id"])
 			require.Equal(t, string(tt.status), lo.FromPtr(paymentSvc.updateReq.PaymentStatus))
 			require.Equal(t, "pi_1", lo.FromPtr(paymentSvc.updateReq.GatewayPaymentID))
 			require.Equal(t, tt.wantErrorMsg, lo.FromPtr(paymentSvc.updateReq.ErrorMessage))
