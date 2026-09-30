@@ -3,6 +3,7 @@ package zoho
 import (
 	"context"
 
+	"github.com/flexprice/flexprice/internal/ee/service"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/integration"
 	"github.com/flexprice/flexprice/internal/integration/zoho"
@@ -15,23 +16,28 @@ import (
 type InvoiceSyncActivities struct {
 	integrationFactory *integration.Factory
 	logger             *logger.Logger
+	invoiceService     service.InvoiceService
 }
 
-func NewInvoiceSyncActivities(integrationFactory *integration.Factory, logger *logger.Logger) *InvoiceSyncActivities {
+func NewInvoiceSyncActivities(integrationFactory *integration.Factory, logger *logger.Logger, invoiceService service.InvoiceService) *InvoiceSyncActivities {
 	return &InvoiceSyncActivities{
 		integrationFactory: integrationFactory,
 		logger:             logger,
+		invoiceService:     invoiceService,
 	}
 }
 
-func (a *InvoiceSyncActivities) SyncInvoiceToZoho(ctx context.Context, input models.ZohoBooksInvoiceSyncWorkflowInput) error {
+func (a *InvoiceSyncActivities) SyncInvoiceToZoho(ctx context.Context, input models.ZohoBooksInvoiceSyncWorkflowInput) (err error) {
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderZohoBooks, err)
+	}()
 
 	zohoIntegration, err := a.integrationFactory.GetZohoBooksIntegration(ctx)
 	if err != nil {
 		if ierr.IsNotFound(err) {
-			return temporal.NewNonRetryableApplicationError("Zoho Books connection not configured", "ConnectionNotFound", err)
+			return temporal.NewNonRetryableApplicationError("Zoho Books connection not configured", ierr.ErrConnectionNotFound, err)
 		}
 		a.logger.Error(ctx, "SyncInvoiceToZoho activity failed to get Zoho Books integration",
 			"error", err,
@@ -62,7 +68,7 @@ func (a *InvoiceSyncActivities) MarkZohoBooksInvoicePaid(ctx context.Context, in
 	zohoIntegration, err := a.integrationFactory.GetZohoBooksIntegration(ctx)
 	if err != nil {
 		if ierr.IsNotFound(err) {
-			return temporal.NewNonRetryableApplicationError("Zoho Books connection not configured", "ConnectionNotFound", err)
+			return temporal.NewNonRetryableApplicationError("Zoho Books connection not configured", ierr.ErrConnectionNotFound, err)
 		}
 		a.logger.Error(ctx, "MarkZohoBooksInvoicePaid activity failed to get Zoho Books integration",
 			"error", err,

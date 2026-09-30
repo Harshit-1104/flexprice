@@ -24,7 +24,7 @@ func NewInvoiceSyncActivities(params service.ServiceParams, logger *logger.Logge
 }
 
 // SyncInvoiceToChargebee syncs an invoice to Chargebee via the service layer.
-func (a *InvoiceSyncActivities) SyncInvoiceToChargebee(ctx context.Context, input models.ChargebeeInvoiceSyncWorkflowInput) error {
+func (a *InvoiceSyncActivities) SyncInvoiceToChargebee(ctx context.Context, input models.ChargebeeInvoiceSyncWorkflowInput) (err error) {
 	a.logger.Info(ctx, "syncing invoice to Chargebee",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -33,6 +33,9 @@ func (a *InvoiceSyncActivities) SyncInvoiceToChargebee(ctx context.Context, inpu
 
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderChargebee, err)
+	}()
 
 	if err := a.invoiceService.SyncInvoiceToChargebeeIfEnabled(ctx, input.InvoiceID); err != nil {
 		a.logger.Error(ctx, "failed to sync invoice to Chargebee",

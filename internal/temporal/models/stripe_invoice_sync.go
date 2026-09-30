@@ -32,3 +32,6 @@ func (input *StripeInvoiceSyncWorkflowInput) Validate() error {
 	}
 	return nil
 }
+
+// InvoiceSyncMaxAttempts is the retry limit shared by all invoice sync workflows.
+const InvoiceSyncMaxAttempts = 3

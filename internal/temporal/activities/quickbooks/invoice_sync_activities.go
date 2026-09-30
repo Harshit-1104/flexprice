@@ -24,7 +24,7 @@ func NewQuickBooksInvoiceSyncActivities(params service.ServiceParams, logger *lo
 }
 
 // SyncInvoiceToQuickBooks syncs an invoice to QuickBooks via the service layer.
-func (a *QuickBooksInvoiceSyncActivities) SyncInvoiceToQuickBooks(ctx context.Context, input models.QuickBooksInvoiceSyncWorkflowInput) error {
+func (a *QuickBooksInvoiceSyncActivities) SyncInvoiceToQuickBooks(ctx context.Context, input models.QuickBooksInvoiceSyncWorkflowInput) (err error) {
 	a.logger.Info(ctx, "syncing invoice to QuickBooks",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -33,6 +33,9 @@ func (a *QuickBooksInvoiceSyncActivities) SyncInvoiceToQuickBooks(ctx context.Co
 
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderQuickBooks, err)
+	}()
 
 	if err := a.invoiceService.SyncInvoiceToQuickBooksIfEnabled(ctx, input.InvoiceID); err != nil {
 		a.logger.Error(ctx, "failed to sync invoice to QuickBooks",

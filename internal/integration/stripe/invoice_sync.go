@@ -596,7 +596,7 @@ func (s *InvoiceSyncService) updateFlexPriceInvoiceFromStripe(ctx context.Contex
 		if flexInvoice.Metadata == nil {
 			flexInvoice.Metadata = make(types.Metadata)
 		}
-		flexInvoice.Metadata["stripe_hosted_invoice_url"] = stripeInvoice.HostedInvoiceURL
+		flexInvoice.Metadata[types.InvoiceMetadataKeyStripeHostedInvoiceURL] = stripeInvoice.HostedInvoiceURL
 		updated = true
 	}
 

@@ -3,6 +3,7 @@ package hubspot
 import (
 	"context"
 
+	"github.com/flexprice/flexprice/internal/ee/service"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/integration"
 	"github.com/flexprice/flexprice/internal/logger"
@@ -15,16 +16,19 @@ import (
 type InvoiceSyncActivities struct {
 	integrationFactory *integration.Factory
 	logger             *logger.Logger
+	invoiceService     service.InvoiceService
 }
 
 // NewInvoiceSyncActivities creates a new instance of InvoiceSyncActivities
 func NewInvoiceSyncActivities(
 	integrationFactory *integration.Factory,
 	logger *logger.Logger,
+	invoiceService service.InvoiceService,
 ) *InvoiceSyncActivities {
 	return &InvoiceSyncActivities{
 		integrationFactory: integrationFactory,
 		logger:             logger,
+		invoiceService:     invoiceService,
 	}
 }
 
@@ -33,7 +37,7 @@ func NewInvoiceSyncActivities(
 func (a *InvoiceSyncActivities) SyncInvoiceToHubSpot(
 	ctx context.Context,
 	input models.HubSpotInvoiceSyncWorkflowInput,
-) error {
+) (err error) {
 	a.logger.Info(ctx, "syncing invoice to HubSpot",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -43,6 +47,9 @@ func (a *InvoiceSyncActivities) SyncInvoiceToHubSpot(
 	// Set context values for tenant and environment
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderHubSpot, err)
+	}()
 
 	// Get HubSpot integration with runtime context
 	hubspotIntegration, err := a.integrationFactory.GetHubSpotIntegration(ctx)
@@ -54,7 +61,7 @@ func (a *InvoiceSyncActivities) SyncInvoiceToHubSpot(
 			// Return NON-RETRYABLE error - connection doesn't exist, retrying won't help
 			return temporal.NewNonRetryableApplicationError(
 				"HubSpot connection not configured",
-				"ConnectionNotFound",
+				ierr.ErrConnectionNotFound,
 				err,
 			)
 		}

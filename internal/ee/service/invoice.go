@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -27,10 +28,14 @@ import (
 	"github.com/flexprice/flexprice/internal/integration/zoho"
 	"github.com/flexprice/flexprice/internal/interfaces"
 	"github.com/flexprice/flexprice/internal/storage"
+	"github.com/flexprice/flexprice/internal/temporal/models"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/flexprice/flexprice/internal/utils"
+	webhookDto "github.com/flexprice/flexprice/internal/webhook/dto"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 )
 
 type InvoiceService interface {
@@ -74,6 +79,7 @@ type InvoiceService interface {
 	SyncInvoiceToQuickBooksIfEnabled(ctx context.Context, invoiceID string) error
 	SyncInvoiceToZohoBooksIfEnabled(ctx context.Context, invoiceID string) error
 	SyncInvoiceToMoyasarIfEnabled(ctx context.Context, inv *invoice.Invoice) error
+	PublishInvoiceSyncWebhook(ctx context.Context, invoiceID string, provider types.SecretProvider, syncErr error)
 	IsFinalizationDue(ctx context.Context, invoiceID string) (bool, error)
 	ListAllTenantDraftInvoices(ctx context.Context, batchSize, offset int) ([]*invoice.Invoice, error)
 
@@ -3535,6 +3541,92 @@ func (s *invoiceService) RecalculateInvoiceAmounts(ctx context.Context, invoiceI
 
 func (s *invoiceService) publishSystemEvent(ctx context.Context, eventName types.WebhookEventName, invoiceID string) {
 	publishInvoiceWebhook(ctx, s.ServiceParams, eventName, invoiceID)
+}
+
+// PublishInvoiceSyncWebhook reports a provider sync activity's outcome; defer it so failures are reported too.
+// A failure is published only once Temporal won't retry it; a success without a mapping was a skip.
+func (s *invoiceService) PublishInvoiceSyncWebhook(ctx context.Context, invoiceID string, provider types.SecretProvider, syncErr error) {
+	if !shouldPublishInvoiceSync(ctx, syncErr) {
+		return
+	}
+
+	eventName := types.WebhookEventInvoiceSyncSuccess
+	internal := &webhookDto.InternalInvoiceSyncEvent{
+		InvoiceID: invoiceID,
+		TenantID:  types.GetTenantID(ctx),
+		Provider:  provider,
+	}
+	if syncErr != nil {
+		eventName = types.WebhookEventInvoiceSyncFailed
+		internal.Error = syncErr.Error()
+	} else if !s.hasInvoiceMapping(ctx, invoiceID, provider) {
+		return
+	}
+
+	event, err := types.NewWebhookEvent(eventName).
+		WithIdentityFromContext(ctx).
+		WithEntity(types.SystemEntityTypeInvoice, invoiceID).
+		WithPayload(internal).
+		Build()
+	if err != nil {
+		s.Logger.Error(ctx, "failed to build invoice sync webhook",
+			"error", err,
+			"invoice_id", invoiceID,
+			"provider", provider)
+		return
+	}
+
+	if err := s.WebhookPublisher.PublishWebhook(ctx, event); err != nil {
+		s.Logger.Error(ctx, "failed to publish invoice sync webhook",
+			"error", err,
+			"event_name", eventName,
+			"invoice_id", invoiceID,
+			"provider", provider)
+	}
+}
+
+// hasInvoiceMapping tells a real sync from a skipped one; a lookup error counts as skipped.
+func (s *invoiceService) hasInvoiceMapping(ctx context.Context, invoiceID string, provider types.SecretProvider) bool {
+	filter := &types.EntityIntegrationMappingFilter{
+		EntityID:      invoiceID,
+		EntityType:    types.IntegrationEntityTypeInvoice,
+		ProviderTypes: []string{string(provider)},
+		QueryFilter:   types.NewDefaultQueryFilter(),
+	}
+	count, err := s.EntityIntegrationMappingRepo.Count(ctx, filter)
+	if err != nil {
+		s.Logger.Error(ctx, "failed to check invoice mapping for sync webhook",
+			"error", err,
+			"invoice_id", invoiceID,
+			"provider", provider)
+		return false
+	}
+	return count > 0
+}
+
+func shouldPublishInvoiceSync(ctx context.Context, syncErr error) bool {
+	if syncErr == nil {
+		return true
+	}
+
+	var appErr *temporal.ApplicationError
+	if errors.As(syncErr, &appErr) {
+		// no connection means the sync never ran
+		if appErr.Type() == ierr.ErrConnectionNotFound {
+			return false
+		}
+
+		if appErr.NonRetryable() {
+			return true
+		}
+	}
+
+	// a call outside an activity counts as the last attempt
+	if !activity.IsActivity(ctx) {
+		return true
+	}
+
+	return activity.GetInfo(ctx).Attempt >= models.InvoiceSyncMaxAttempts
 }
 
 // publishInvoiceWebhook publishes an invoice-payload system event. Package
