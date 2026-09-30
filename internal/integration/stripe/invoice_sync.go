@@ -683,6 +683,43 @@ func (s *InvoiceSyncService) IsStripeInvoiceSettled(ctx context.Context, flexpri
 	return stripeInvoice.Status == stripe.InvoiceStatusPaid || stripeInvoice.Status == stripe.InvoiceStatusVoid, nil
 }
 
+// VoidInvoiceInStripe voids the Stripe invoice synced for a FlexPrice invoice, which also stops Stripe's retries,
+// and reports whether the caller may proceed. It returns false without voiding when Stripe has it paid.
+func (s *InvoiceSyncService) VoidInvoiceInStripe(ctx context.Context, flexpriceInvoiceID string) (bool, error) {
+	mapping, err := s.getExistingStripeMapping(ctx, flexpriceInvoiceID)
+	if ierr.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	stripeClient, _, err := s.client.GetStripeClient(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	stripeInvoice, err := stripeClient.V1Invoices.Retrieve(ctx, mapping.ProviderEntityID, nil)
+	if err != nil {
+		return false, ierr.WithError(err).
+			WithHint("Unable to get invoice from Stripe").
+			Mark(ierr.ErrSystem)
+	}
+	if stripeInvoice.Status == stripe.InvoiceStatusVoid {
+		return true, nil
+	}
+	if stripeInvoice.Status == stripe.InvoiceStatusPaid {
+		return false, nil
+	}
+
+	if _, err := stripeClient.V1Invoices.VoidInvoice(ctx, mapping.ProviderEntityID, nil); err != nil {
+		return false, ierr.WithError(err).
+			WithHint("Unable to void invoice in Stripe").
+			Mark(ierr.ErrSystem)
+	}
+	return true, nil
+}
+
 // IsInvoiceSyncedToStripe checks if an invoice is already synced to Stripe
 func (s *InvoiceSyncService) IsInvoiceSyncedToStripe(ctx context.Context, invoiceID string) bool {
 	_, err := s.getExistingStripeMapping(ctx, invoiceID)

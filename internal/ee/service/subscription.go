@@ -5698,7 +5698,7 @@ func (s *subscriptionService) ProcessOverdueSubscriptionInvoices(ctx context.Con
 				"environment_id", inv.EnvironmentID)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -5942,10 +5942,10 @@ func (s *subscriptionService) ProcessAutoCancellationSubscriptions(ctx context.C
 			return isPastGracePeriod
 		})
 
-		// Extract unique subscription IDs from eligible invoices
-		subscriptionIDs := lo.Uniq(lo.FilterMap(eligibleInvoices, func(inv *invoice.Invoice, _ int) (string, bool) {
-			return lo.FromPtr(inv.SubscriptionID), inv.SubscriptionID != nil
-		}))
+		overdueInvoicesBySub := lo.GroupBy(eligibleInvoices, func(inv *invoice.Invoice) string {
+			return lo.FromPtr(inv.SubscriptionID)
+		})
+		subscriptionIDs := lo.Keys(overdueInvoicesBySub)
 
 		s.Logger.Debug(ctx, "found subscriptions with invoices past grace period",
 			"tenant_id", tenantConfig.TenantID,
@@ -5961,10 +5961,9 @@ func (s *subscriptionService) ProcessAutoCancellationSubscriptions(ctx context.C
 			continue
 		}
 
-		// Get ONLY ACTIVE subscriptions for this tenant x environment
 		filter := &types.SubscriptionFilter{
 			SubscriptionIDs:    subscriptionIDs,
-			SubscriptionStatus: []types.SubscriptionStatus{types.SubscriptionStatusActive},
+			SubscriptionStatus: []types.SubscriptionStatus{types.SubscriptionStatusActive, types.SubscriptionStatusIncomplete},
 		}
 
 		subscriptions, err := s.SubRepo.List(tenantCtx, filter)
@@ -5984,19 +5983,64 @@ func (s *subscriptionService) ProcessAutoCancellationSubscriptions(ctx context.C
 		canceledCount := 0
 		failedCount := 0
 
-		// Cancel all subscriptions - they've already been filtered for eligibility
+		stripeIntegration, err := s.IntegrationFactory.GetStripeIntegration(tenantCtx)
+		if err != nil {
+			s.Logger.Error(ctx, "failed to get Stripe integration for auto-cancellation",
+				"error", err,
+				"tenant_id", tenantConfig.TenantID,
+				"environment_id", tenantConfig.EnvironmentID)
+			continue
+		}
+		invoiceService := NewInvoiceService(s.ServiceParams)
+
+		// Void on Stripe first so nothing can be collected after cancel; Flexprice voids after cancel
+		// so a failed cancel is retried next tick while the invoice is still unpaid.
 		for _, sub := range subscriptions {
+			overdueInvoices := overdueInvoicesBySub[sub.ID]
+			if len(overdueInvoices) == 0 {
+				continue
+			}
+
+			voidedInStripe := true
+			for _, inv := range overdueInvoices {
+				ok, err := stripeIntegration.InvoiceSyncSvc.VoidInvoiceInStripe(tenantCtx, inv.ID)
+				if err != nil {
+					s.Logger.Error(ctx, "failed to void overdue invoice in Stripe, retrying next run",
+						"error", err,
+						"invoice_id", inv.ID,
+						"subscription_id", sub.ID)
+				} else if !ok {
+					s.Logger.Info(ctx, "Stripe invoice already paid, holding auto-cancellation",
+						"invoice_id", inv.ID,
+						"subscription_id", sub.ID)
+				}
+				if !ok {
+					voidedInStripe = false
+					break
+				}
+			}
+			if !voidedInStripe {
+				continue
+			}
+
+			reason := types.CancellationReasonPaymentOverdue
+			if lo.SomeBy(overdueInvoices, func(inv *invoice.Invoice) bool {
+				return types.InvoiceBillingReason(inv.BillingReason).IsFirstSubscriptionOpenInvoiceReason()
+			}) {
+				reason = types.CancellationReasonPaymentIncompleteExpired
+			}
+
 			s.Logger.Info(ctx, "auto-cancelling subscription",
 				"subscription_id", sub.ID,
 				"tenant_id", tenantConfig.TenantID,
 				"environment_id", tenantConfig.EnvironmentID,
 				"grace_period_days", tenantConfig.GracePeriodDays,
-				"reason", "grace_period_expired",
+				"reason", reason,
 			)
 
-			// Cancel the subscription
 			if _, err := s.CancelSubscription(tenantCtx, sub.ID, &dto.CancelSubscriptionRequest{
 				CancellationType: types.CancellationTypeImmediate,
+				Reason:           reason,
 			}); err != nil {
 				s.Logger.Error(ctx, "failed to auto-cancel subscription",
 					"subscription_id", sub.ID,
@@ -6009,10 +6053,19 @@ func (s *subscriptionService) ProcessAutoCancellationSubscriptions(ctx context.C
 
 			canceledCount++
 
+			for _, inv := range overdueInvoices {
+				if _, err := invoiceService.VoidInvoice(tenantCtx, inv.ID, dto.InvoiceVoidRequest{}); err != nil {
+					s.Logger.Error(ctx, "failed to void overdue invoice after auto-cancellation",
+						"error", err,
+						"invoice_id", inv.ID,
+						"subscription_id", sub.ID)
+				}
+			}
+
 			// Log audit trail
 			s.Logger.Info(ctx, "successfully auto-canceled subscription",
 				"subscription_id", sub.ID,
-				"reason", "grace_period_expired",
+				"reason", reason,
 				"grace_period_days", tenantConfig.GracePeriodDays,
 				"canceled_by", "auto_cancellation_system",
 				"tenant_id", tenantConfig.TenantID,
