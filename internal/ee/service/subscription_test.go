@@ -10751,7 +10751,7 @@ func (s *SubscriptionServiceSuite) TestProcessAutoCancellationSubscriptions() {
 		{"renewal past grace", types.SubscriptionStatusActive, types.InvoiceBillingReasonSubscriptionCycle, now.AddDate(0, 0, -10),
 			types.SubscriptionStatusCancelled, types.CancellationReasonPaymentOverdue, types.InvoiceStatusVoided},
 		{"incomplete create past grace", types.SubscriptionStatusIncomplete, types.InvoiceBillingReasonSubscriptionCreate, now.AddDate(0, 0, -10),
-			types.SubscriptionStatusCancelled, types.CancellationReasonPaymentIncompleteExpired, types.InvoiceStatusVoided},
+			types.SubscriptionStatusCancelled, types.CancellationReasonPaymentOverdue, types.InvoiceStatusVoided},
 		{"renewal within grace", types.SubscriptionStatusIncomplete, types.InvoiceBillingReasonSubscriptionCycle, now.AddDate(0, 0, -1),
 			types.SubscriptionStatusIncomplete, "", types.InvoiceStatusFinalized},
 	}

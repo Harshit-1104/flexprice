@@ -878,7 +878,7 @@ func (s *PaymentService) GetPaymentStatusByPaymentIntent(ctx context.Context, pa
 }
 
 // GetPaymentIntent gets a payment intent from Stripe
-func (s *PaymentService) GetPaymentIntent(ctx context.Context, paymentIntentID string, environmentID string) (*stripe.PaymentIntent, error) {
+func (s *PaymentService) GetPaymentIntent(ctx context.Context, paymentIntentID string) (*stripe.PaymentIntent, error) {
 	// Get Stripe client
 	stripeClient, _, err := s.client.GetStripeClient(ctx)
 	if err != nil {
@@ -1647,7 +1647,7 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 	}
 
 	// Create external payment record
-	err = s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusSucceeded, paymentService)
+	err = s.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusSucceeded, paymentService)
 	if err != nil {
 		s.logger.Error(ctx, "failed to create external payment record",
 			"error", err,
@@ -1667,11 +1667,6 @@ func (s *PaymentService) ProcessExternalStripePayment(ctx context.Context, payme
 	}
 
 	return nil
-}
-
-// RecordFailedStripeInvoicePayment upserts a FAILED payment for a failed attempt on a synced Stripe invoice, one row per payment intent.
-func (s *PaymentService) RecordFailedStripeInvoicePayment(ctx context.Context, paymentIntent *stripe.PaymentIntent, flexpriceInvoiceID string, paymentService interfaces.PaymentService) error {
-	return s.createExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, paymentService)
 }
 
 // ReconcileStripeInvoicePaidWithoutPaymentIntent marks the FlexPrice invoice paid when Stripe settled it without a
@@ -1715,8 +1710,8 @@ func (s *PaymentService) GetStripeInvoicePaymentIntentID(ctx context.Context, st
 	return "", nil
 }
 
-// createExternalPaymentRecord creates a payment record for an external Stripe payment
-func (s *PaymentService) createExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, status types.PaymentStatus, paymentService interfaces.PaymentService) error {
+// CreateExternalPaymentRecord creates a payment record in the given status for an external Stripe payment
+func (s *PaymentService) CreateExternalPaymentRecord(ctx context.Context, paymentIntent *stripe.PaymentIntent, invoiceID string, status types.PaymentStatus, paymentService interfaces.PaymentService) error {
 	// Convert amount from cents to decimal
 	amount := decimal.NewFromInt(paymentIntent.Amount).Div(decimal.NewFromInt(100))
 

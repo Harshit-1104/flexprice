@@ -664,8 +664,11 @@ func (s *InvoiceSyncService) updateStripeInvoiceMetadata(ctx context.Context, st
 // IsStripeInvoiceSettled reports whether the Stripe invoice synced for a FlexPrice invoice is already paid or voided.
 func (s *InvoiceSyncService) IsStripeInvoiceSettled(ctx context.Context, flexpriceInvoiceID string) (bool, error) {
 	mapping, err := s.getExistingStripeMapping(ctx, flexpriceInvoiceID)
-	if err != nil {
+	if ierr.IsNotFound(err) {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 
 	stripeClient, _, err := s.client.GetStripeClient(ctx)

@@ -147,11 +147,8 @@ func (p PaymentBehavior) String() string {
 	return string(p)
 }
 
-// Cancellation reasons set by auto-cancellation when an invoice stays unpaid past due date + grace.
-const (
-	CancellationReasonPaymentIncompleteExpired = "payment_incomplete_expired"
-	CancellationReasonPaymentOverdue           = "payment_overdue"
-)
+// CancellationReasonPaymentOverdue is set by auto-cancellation when an invoice stays unpaid past due date + grace.
+const CancellationReasonPaymentOverdue = "payment_overdue"
 
 // IsIncompleteType reports whether the behavior gates the subscription on invoice payment.
 func (p PaymentBehavior) IsIncompleteType() bool {

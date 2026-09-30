@@ -28,6 +28,8 @@ flowchart TD
     E --> F["Overdue handling"]
 ```
 
+
+
 **Renewal**
 
 ```mermaid
@@ -58,6 +60,8 @@ flowchart TD
     R6 -. "process pending CGAs immediately" .-> C1
 ```
 
+
+
 **Overdue handling** (15 min auto-cancellation workflow, per unpaid invoice)
 
 ```mermaid
@@ -69,6 +73,10 @@ flowchart LR
     A1 -- paid --> P["active<br/>CGs applied, EGs on"]
     A2 -- paid --> P
 ```
+
+
+
+
 
 #### New subscription
 
@@ -127,6 +135,32 @@ flowchart LR
     - CGAs get cancelled.
     - **(new)** Auto-cancel currently only covers active subscriptions; extend it to incomplete.
   - Paid at any point before cancel: active, CGs applied, EGs on.
+
+
+
+## Mental model of the flow:
+
+Today a renewal can become incomplete (stop it's benefits and access) from **three places**:
+
+1. `HandlePaymentBehavior` after a failed auto-charge (without Stripe);
+2. the Stripe `invoice.payment_failed` webhook;
+3. the overdue cron at the due date.
+
+
+| Stage            | What sets the status                                                                                                                                                        |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Creation         | `HandlePaymentBehavior`, unchanged: incomplete-type behaviours start incomplete until paid                                                                                  |
+| Trial end        | incomplete until the trial-end invoice is paid, unchanged                                                                                                                   |
+| **Renewal**      | the subscription stays active and next period's grants are held (P1). **Only the overdue cron** moves it to incomplete, when the renewal invoice is unpaid at its due date. |
+| Paid             | the paid handler: activate if incomplete, release held grants                                                                                                               |
+| Due date + grace | auto-cancel: void and cancel with `payment_overdue`                                                                                                                         |
+
+
+
+
+
+
+
 
 ---
 

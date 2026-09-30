@@ -382,7 +382,7 @@ func TestCreateExternalPaymentRecord(t *testing.T) {
 			paymentSvc := &externalTestPaymentService{}
 			pi := &stripe.PaymentIntent{ID: "pi_1", Amount: 1000, Currency: "usd", LastPaymentError: tt.lastError}
 
-			require.NoError(t, s.createExternalPaymentRecord(context.Background(), pi, "inv_1", tt.status, paymentSvc))
+			require.NoError(t, s.CreateExternalPaymentRecord(context.Background(), pi, "inv_1", tt.status, paymentSvc))
 
 			require.Equal(t, tt.wantIdempotency, paymentSvc.createReq.IdempotencyKey)
 			require.Equal(t, string(tt.status), lo.FromPtr(paymentSvc.updateReq.PaymentStatus))

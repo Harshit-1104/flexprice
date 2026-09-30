@@ -1565,7 +1565,8 @@ func (s *creditGrantService) ShouldGateApplicationOnPayment(
 		return false, nil
 	}
 
-	if !sub.CurrentPeriodEnd.After(cga.PeriodStart) {
+	// means period didn't rollover for the subs but grant is trying to apply
+	if !cga.PeriodStart.Before(sub.CurrentPeriodEnd) {
 		return true, nil
 	}
 
@@ -1584,6 +1585,7 @@ func (s *creditGrantService) ShouldGateApplicationOnPayment(
 	if err != nil {
 		return false, err
 	}
+	// the renewal invoice is created in the same transaction as the rollover, so the gate never sees a finished period without its invoice.
 	if len(invoices) == 0 {
 		return false, nil
 	}

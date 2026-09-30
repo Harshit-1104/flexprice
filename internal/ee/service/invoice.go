@@ -1213,8 +1213,7 @@ func (s *invoiceService) performFinalizeInvoiceActions(ctx context.Context, inv 
 
 	notifyInvoiceFinalized(ctx, s.ServiceParams, inv.ID)
 
-	if inv.PaymentStatus == types.PaymentStatusSucceeded &&
-		inv.BillingReason == string(types.InvoiceBillingReasonSubscriptionCycle) {
+	if inv.PaymentStatus == types.PaymentStatusSucceeded {
 		if err := s.HandleIncompleteSubscriptionPayment(ctx, inv); err != nil {
 			s.Logger.Error(ctx, "failed to handle subscription invoice payment",
 				"invoice_id", inv.ID,

@@ -216,9 +216,7 @@ func (s *subscriptionPaymentProcessor) attemptPaymentAllowIncomplete(
 	result := s.processPayment(ctx, sub, inv, types.PaymentBehaviorAllowIncomplete, flowType)
 
 	// Only creation, trial-end and renewal invoices drive status; threshold and cancel invoices don't.
-	reason := types.InvoiceBillingReason(inv.BillingReason)
-	if flowType == types.InvoiceFlowCancel ||
-		(reason != types.InvoiceBillingReasonSubscriptionCycle && !reason.IsFirstSubscriptionOpenInvoiceReason()) {
+	if flowType == types.InvoiceFlowCancel || !types.InvoiceBillingReason(inv.BillingReason).IsPaymentGatingAllowedInvoiceReason() {
 		return nil
 	}
 

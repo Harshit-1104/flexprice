@@ -347,6 +347,17 @@ func (r InvoiceBillingReason) IsFirstSubscriptionOpenInvoiceReason() bool {
 	}
 }
 
+// IsPaymentGatingAllowedInvoiceReason reports whether paying or failing to pay an invoice with this reason
+// may change the subscription's status or release its held credit grants.
+func (r InvoiceBillingReason) IsPaymentGatingAllowedInvoiceReason() bool {
+	return lo.Contains([]InvoiceBillingReason{
+		InvoiceBillingReasonSubscriptionCreate,
+		InvoiceBillingReasonSubscriptionTrialEnd,
+		InvoiceBillingReasonSubscriptionUpdate,
+		InvoiceBillingReasonSubscriptionCycle,
+	}, r)
+}
+
 const (
 	// InvoiceDefaultDueDays is the default number of days after invoice creation when payment is due
 	InvoiceDefaultDueDays = 1

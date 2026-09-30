@@ -964,6 +964,7 @@ func (p *paymentProcessor) handleCardPayment(ctx context.Context, paymentObj *pa
 			Mark(ierr.ErrSystem)
 	}
 
+	// so we don't charge the same invoice twice
 	if paymentObj.DestinationType == types.PaymentDestinationTypeInvoice {
 		settled, err := stripeIntegration.InvoiceSyncSvc.IsStripeInvoiceSettled(ctx, paymentObj.DestinationID)
 		if err != nil {

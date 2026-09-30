@@ -159,7 +159,7 @@ func (h *Handler) handlePaymentIntentSucceeded(ctx context.Context, event *strip
 	)
 
 	// Fetch the latest payment intent data from Stripe API instead of relying on webhook data
-	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID, environmentID)
+	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID)
 	if err != nil {
 		h.logger.Error(ctx, "failed to fetch payment intent from Stripe API, skipping event",
 			"error", err,
@@ -497,7 +497,7 @@ func (h *Handler) handleInvoicePaymentPaid(ctx context.Context, event *stripeapi
 	}
 
 	// Get payment intent details from Stripe
-	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID, environmentID)
+	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID)
 	if err != nil {
 		h.logger.Error(ctx, "failed to get payment intent from Stripe, skipping event",
 			"error", err,
@@ -536,11 +536,14 @@ func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripea
 	}
 
 	flexpriceInvoiceID, err := h.invoiceSyncSvc.GetFlexPriceInvoiceID(ctx, stripeInvoice.ID)
-	if err != nil {
+	if ierr.IsNotFound(err) {
 		h.logger.Info(ctx, "no FlexPrice invoice for failed Stripe invoice, skipping event",
 			"stripe_invoice_id", stripeInvoice.ID,
 			"event_id", event.ID)
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	if err := services.SubscriptionService.MarkSubscriptionIncomplete(ctx, flexpriceInvoiceID); err != nil {
@@ -559,7 +562,7 @@ func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripea
 		return nil
 	}
 
-	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID, environmentID)
+	paymentIntent, err := h.paymentSvc.GetPaymentIntent(ctx, paymentIntentID)
 	if err != nil {
 		h.logger.Error(ctx, "failed to get payment intent from Stripe, skipping event",
 			"error", err,
@@ -568,7 +571,7 @@ func (h *Handler) handleInvoicePaymentFailed(ctx context.Context, event *stripea
 		return nil
 	}
 
-	if err := h.paymentSvc.RecordFailedStripeInvoicePayment(ctx, paymentIntent, flexpriceInvoiceID, services.PaymentService); err != nil {
+	if err := h.paymentSvc.CreateExternalPaymentRecord(ctx, paymentIntent, flexpriceInvoiceID, types.PaymentStatusFailed, services.PaymentService); err != nil {
 		h.logger.Error(ctx, "failed to record failed Stripe invoice payment",
 			"error", err,
 			"payment_intent_id", paymentIntentID,
@@ -954,7 +957,7 @@ func (h *Handler) handleCheckoutSessionCompleted(ctx context.Context, event *str
 	// Get payment intent if it exists
 	var paymentIntent *stripeapi.PaymentIntent
 	if piID != "" {
-		paymentIntent, err = h.paymentSvc.GetPaymentIntent(ctx, piID, environmentID)
+		paymentIntent, err = h.paymentSvc.GetPaymentIntent(ctx, piID)
 		if err != nil {
 			h.logger.Error(ctx, "failed to fetch payment intent, continuing without it",
 				"error", err,

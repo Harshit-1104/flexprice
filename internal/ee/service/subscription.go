@@ -3527,6 +3527,15 @@ func (s *subscriptionService) processSubscriptionPeriod(ctx context.Context, sub
 			}
 		}
 
+		// Skipped or already-paid renewals release the new period's held grants now instead of on CGA backoff.
+		if sub.SubscriptionStatus == types.SubscriptionStatusActive && types.PaymentBehavior(sub.PaymentBehavior).IsIncompleteType() {
+			if err := s.processPendingCreditGrantsForSubscription(ctx, sub); err != nil {
+				s.Logger.Error(ctx, "failed to process pending credit grants after period rollover",
+					"error", err,
+					"subscription_id", sub.ID)
+			}
+		}
+
 		s.Logger.Info(ctx, "completed subscription period processing",
 			"subscription_id", sub.ID,
 			"original_period_start", periods[0].start,
@@ -5581,7 +5590,7 @@ func (s *subscriptionService) HandleSubscriptionActivatingInvoicePaid(ctx contex
 		return nil
 	}
 	reason := types.InvoiceBillingReason(inv.BillingReason)
-	if !reason.IsFirstSubscriptionOpenInvoiceReason() && reason != types.InvoiceBillingReasonSubscriptionCycle {
+	if !reason.IsPaymentGatingAllowedInvoiceReason() {
 		return nil
 	}
 
@@ -5598,6 +5607,7 @@ func (s *subscriptionService) HandleSubscriptionActivatingInvoicePaid(ctx contex
 		return s.activateIncompleteSubscription(ctx, sub)
 	}
 
+	// when the first renewal charge on subscription succeeds, so we never moved the subscription to incomplete, only held off it's new period benefits.
 	return s.processPendingCreditGrantsForSubscription(ctx, sub)
 }
 
@@ -6024,11 +6034,6 @@ func (s *subscriptionService) ProcessAutoCancellationSubscriptions(ctx context.C
 			}
 
 			reason := types.CancellationReasonPaymentOverdue
-			if lo.SomeBy(overdueInvoices, func(inv *invoice.Invoice) bool {
-				return types.InvoiceBillingReason(inv.BillingReason).IsFirstSubscriptionOpenInvoiceReason()
-			}) {
-				reason = types.CancellationReasonPaymentIncompleteExpired
-			}
 
 			s.Logger.Info(ctx, "auto-cancelling subscription",
 				"subscription_id", sub.ID,
