@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/flexprice/flexprice/internal/api/dto"
 	"github.com/flexprice/flexprice/internal/domain/connection"
 	"github.com/flexprice/flexprice/internal/domain/customer"
+	"github.com/flexprice/flexprice/internal/domain/entityintegrationmapping"
 	"github.com/flexprice/flexprice/internal/domain/events"
 	"github.com/flexprice/flexprice/internal/domain/invoice"
 	"github.com/flexprice/flexprice/internal/domain/meter"
@@ -23,10 +25,16 @@ import (
 	"github.com/flexprice/flexprice/internal/testutil"
 	"github.com/flexprice/flexprice/internal/types"
 	"github.com/flexprice/flexprice/internal/utils"
+	webhookDto "github.com/flexprice/flexprice/internal/webhook/dto"
 	webhookPublisher "github.com/flexprice/flexprice/internal/webhook/publisher"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
 )
 
 // recordingWebhookPublisher captures WebhookEvent publishes while delegating to inner.
@@ -3309,5 +3317,124 @@ func (s *InvoiceServiceSuite) TestListInvoicesTaxSummaryIsPerInvoice() {
 		s.Len(inv.Taxes, i+1, "invoice %s should carry exactly its own %d rows", id, i+1)
 		s.True(decimal.NewFromInt(int64(i+1)).Equal(inv.TaxSummary.TotalExclusiveTax),
 			"invoice %s: want exclusive %d, got %s", id, i+1, inv.TaxSummary.TotalExclusiveTax)
+	}
+}
+
+func (s *InvoiceServiceSuite) TestPublishInvoiceSyncWebhook() {
+	tests := []struct {
+		name        string
+		invoiceID   string
+		withMapping bool
+		syncErr     error
+		wantEvent   types.WebhookEventName
+		wantError   string
+	}{
+		{name: "success with mapping", invoiceID: "inv_sync_ok", withMapping: true, wantEvent: types.WebhookEventInvoiceSyncSuccess},
+		{name: "success without mapping is a skip", invoiceID: "inv_sync_skip"},
+		{name: "failure without mapping", invoiceID: "inv_sync_fail", syncErr: errors.New("stripe down"), wantEvent: types.WebhookEventInvoiceSyncFailed, wantError: "stripe down"},
+		{name: "failure after mapping was created", invoiceID: "inv_sync_fail_mapped", withMapping: true, syncErr: errors.New("finalize failed"), wantEvent: types.WebhookEventInvoiceSyncFailed, wantError: "finalize failed"},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := s.GetContext()
+			if tt.withMapping {
+				s.NoError(s.GetStores().EntityIntegrationMappingRepo.Create(ctx, &entityintegrationmapping.EntityIntegrationMapping{
+					ID:               "eim_" + tt.invoiceID,
+					EntityID:         tt.invoiceID,
+					EntityType:       types.IntegrationEntityTypeInvoice,
+					ProviderType:     string(types.SecretProviderStripe),
+					ProviderEntityID: "in_" + tt.invoiceID,
+					EnvironmentID:    types.GetEnvironmentID(ctx),
+					BaseModel:        types.GetDefaultBaseModel(ctx),
+				}))
+			}
+
+			s.service.PublishInvoiceSyncWebhook(ctx, tt.invoiceID, types.SecretProviderStripe, tt.syncErr)
+
+			events := lo.Filter(s.GetPublishedWebhooks(), func(e *types.WebhookEvent, _ int) bool {
+				return e.EntityID == tt.invoiceID
+			})
+			if tt.wantEvent == "" {
+				s.Empty(events)
+				return
+			}
+			s.Require().Len(events, 1)
+			s.Equal(tt.wantEvent, events[0].EventName)
+			s.Equal(types.SystemEntityTypeInvoice, events[0].EntityType)
+
+			var internal webhookDto.InternalInvoiceSyncEvent
+			s.Require().NoError(json.Unmarshal(events[0].Payload, &internal))
+			s.Equal(tt.invoiceID, internal.InvoiceID)
+			s.Equal(types.SecretProviderStripe, internal.Provider)
+			s.Equal(tt.wantError, internal.Error)
+		})
+	}
+}
+
+func (s *InvoiceServiceSuite) TestPublishInvoiceSyncWebhook_IgnoresOtherProviderMapping() {
+	ctx := s.GetContext()
+	s.NoError(s.GetStores().EntityIntegrationMappingRepo.Create(ctx, &entityintegrationmapping.EntityIntegrationMapping{
+		ID:               "eim_razorpay_only",
+		EntityID:         "inv_razorpay_only",
+		EntityType:       types.IntegrationEntityTypeInvoice,
+		ProviderType:     string(types.SecretProviderRazorpay),
+		ProviderEntityID: "rzp_inv",
+		EnvironmentID:    types.GetEnvironmentID(ctx),
+		BaseModel:        types.GetDefaultBaseModel(ctx),
+	}))
+
+	s.service.PublishInvoiceSyncWebhook(ctx, "inv_razorpay_only", types.SecretProviderStripe, nil)
+
+	s.Empty(lo.Filter(s.GetPublishedWebhooks(), func(e *types.WebhookEvent, _ int) bool {
+		return e.EntityID == "inv_razorpay_only"
+	}))
+}
+
+// Outside an activity every call counts as the last attempt.
+func TestShouldPublishInvoiceSync_LastAttempt(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"success", nil, true},
+		{"retryable failure", errors.New("provider timeout"), true},
+		{"non-retryable failure", temporal.NewNonRetryableApplicationError("bad address", "InvoiceValidationError", nil), true},
+		{"missing connection is never published", temporal.NewNonRetryableApplicationError("not configured", ierr.ErrConnectionNotFound, nil), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, shouldPublishInvoiceSync(context.Background(), tt.err))
+		})
+	}
+}
+
+// The test activity env runs attempt 1, so only retryable failures are held back.
+func TestShouldPublishInvoiceSync_FirstAttempt(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"success", nil, true},
+		{"retryable failure", errors.New("provider timeout"), false},
+		{"non-retryable failure", temporal.NewNonRetryableApplicationError("bad address", "InvoiceValidationError", nil), true},
+		{"missing connection is never published", temporal.NewNonRetryableApplicationError("not configured", ierr.ErrConnectionNotFound, nil), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestActivityEnvironment()
+			env.RegisterActivityWithOptions(func(ctx context.Context) (bool, error) {
+				return shouldPublishInvoiceSync(ctx, tt.err), nil
+			}, activity.RegisterOptions{Name: "publish"})
+
+			val, err := env.ExecuteActivity("publish")
+			require.NoError(t, err)
+			var got bool
+			require.NoError(t, val.Get(&got))
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }

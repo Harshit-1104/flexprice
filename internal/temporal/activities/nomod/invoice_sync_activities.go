@@ -3,6 +3,7 @@ package nomod
 import (
 	"context"
 
+	"github.com/flexprice/flexprice/internal/ee/service"
 	ierr "github.com/flexprice/flexprice/internal/errors"
 	"github.com/flexprice/flexprice/internal/integration"
 	"github.com/flexprice/flexprice/internal/integration/nomod"
@@ -18,6 +19,7 @@ type InvoiceSyncActivities struct {
 	integrationFactory *integration.Factory
 	customerService    interfaces.CustomerService
 	logger             *logger.Logger
+	invoiceService     service.InvoiceService
 }
 
 // NewInvoiceSyncActivities creates a new Nomod invoice sync activities handler
@@ -25,11 +27,13 @@ func NewInvoiceSyncActivities(
 	integrationFactory *integration.Factory,
 	customerService interfaces.CustomerService,
 	logger *logger.Logger,
+	invoiceService service.InvoiceService,
 ) *InvoiceSyncActivities {
 	return &InvoiceSyncActivities{
 		integrationFactory: integrationFactory,
 		customerService:    customerService,
 		logger:             logger,
+		invoiceService:     invoiceService,
 	}
 }
 
@@ -38,7 +42,7 @@ func NewInvoiceSyncActivities(
 func (a *InvoiceSyncActivities) SyncInvoiceToNomod(
 	ctx context.Context,
 	input models.NomodInvoiceSyncWorkflowInput,
-) error {
+) (err error) {
 	a.logger.Info(ctx, "syncing invoice to Nomod",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -48,6 +52,9 @@ func (a *InvoiceSyncActivities) SyncInvoiceToNomod(
 	// Set context values for tenant and environment
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderNomod, err)
+	}()
 
 	// Get Nomod integration with runtime context
 	nomodIntegration, err := a.integrationFactory.GetNomodIntegration(ctx)
@@ -59,7 +66,7 @@ func (a *InvoiceSyncActivities) SyncInvoiceToNomod(
 			// Return NON-RETRYABLE error - connection doesn't exist, retrying won't help
 			return temporal.NewNonRetryableApplicationError(
 				"Nomod connection not configured",
-				"ConnectionNotFound",
+				ierr.ErrConnectionNotFound,
 				err,
 			)
 		}

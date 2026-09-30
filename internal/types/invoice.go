@@ -36,6 +36,7 @@ const (
 	// InvoiceMetadataKeyCollapsedInvoiceDisplayName is the customer-facing label to use when a
 	// collector clubs the invoice lines into a single amount due item.
 	InvoiceMetadataKeyCollapsedInvoiceDisplayName InvoiceMetadataKey = "collapsed_invoice_display_name"
+	InvoiceMetadataKeyStripeHostedInvoiceURL      InvoiceMetadataKey = "stripe_hosted_invoice_url"
 )
 
 func CollapsedInvoiceDisplayName(md Metadata) string {

@@ -24,7 +24,7 @@ func NewInvoiceSyncActivities(params service.ServiceParams, logger *logger.Logge
 }
 
 // SyncInvoiceToStripe syncs an invoice to Stripe via the service layer.
-func (a *InvoiceSyncActivities) SyncInvoiceToStripe(ctx context.Context, input models.StripeInvoiceSyncWorkflowInput) error {
+func (a *InvoiceSyncActivities) SyncInvoiceToStripe(ctx context.Context, input models.StripeInvoiceSyncWorkflowInput) (err error) {
 	a.logger.Info(ctx, "syncing invoice to Stripe",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -33,6 +33,9 @@ func (a *InvoiceSyncActivities) SyncInvoiceToStripe(ctx context.Context, input m
 
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderStripe, err)
+	}()
 
 	if err := a.invoiceService.SyncInvoiceToStripeIfEnabled(ctx, input.InvoiceID, input.CollectionMethod); err != nil {
 		a.logger.Error(ctx, "failed to sync invoice to Stripe",

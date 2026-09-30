@@ -24,7 +24,7 @@ func NewInvoiceSyncActivities(params service.ServiceParams, logger *logger.Logge
 }
 
 // SyncInvoiceToRazorpay syncs an invoice to Razorpay via the service layer.
-func (a *InvoiceSyncActivities) SyncInvoiceToRazorpay(ctx context.Context, input models.RazorpayInvoiceSyncWorkflowInput) error {
+func (a *InvoiceSyncActivities) SyncInvoiceToRazorpay(ctx context.Context, input models.RazorpayInvoiceSyncWorkflowInput) (err error) {
 	a.logger.Info(ctx, "syncing invoice to Razorpay",
 		"invoice_id", input.InvoiceID,
 		"customer_id", input.CustomerID,
@@ -33,6 +33,9 @@ func (a *InvoiceSyncActivities) SyncInvoiceToRazorpay(ctx context.Context, input
 
 	ctx = types.SetTenantID(ctx, input.TenantID)
 	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	defer func() {
+		a.invoiceService.PublishInvoiceSyncWebhook(ctx, input.InvoiceID, types.SecretProviderRazorpay, err)
+	}()
 
 	if err := a.invoiceService.SyncInvoiceToRazorpayIfEnabled(ctx, input.InvoiceID); err != nil {
 		a.logger.Error(ctx, "failed to sync invoice to Razorpay",

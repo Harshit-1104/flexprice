@@ -30,7 +30,7 @@ func WhopInvoiceSyncWorkflow(ctx workflow.Context, input models.WhopInvoiceSyncW
 
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Minute,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: models.InvoiceSyncMaxAttempts},
 	})
 
 	if err := workflow.Sleep(ctx, 5*time.Second); err != nil {

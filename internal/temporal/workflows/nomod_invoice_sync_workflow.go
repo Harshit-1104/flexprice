@@ -36,7 +36,7 @@ func NomodInvoiceSyncWorkflow(ctx workflow.Context, input models.NomodInvoiceSyn
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts: 3,
+			MaximumAttempts: models.InvoiceSyncMaxAttempts,
 		},
 	}
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)
