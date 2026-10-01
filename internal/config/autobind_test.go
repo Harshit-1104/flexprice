@@ -103,9 +103,9 @@ func TestAutoBindLeavesOptionalPointerNil(t *testing.T) {
 }
 
 // TestUsageAlertsOverridesFromEnv confirms usage_alerts.overrides (a slice of structs) is
-// parsed from its JSON env var and that ForScope applies it.
+// decoded from a JSON-array env var and that ForScope applies it.
 func TestUsageAlertsOverridesFromEnv(t *testing.T) {
-	t.Setenv("FLEXPRICE_USAGE_ALERTS_OVERRIDES_JSON", `[{"tenant_id":"t1","environment_id":"e1","schedule_delay":"30s","stale_after":"2m"}]`)
+	t.Setenv("FLEXPRICE_USAGE_ALERTS_OVERRIDES", `[{"tenant_id":"t1","environment_id":"e1","schedule_delay":"30s","stale_after":"2m"}]`)
 
 	cfg, err := NewConfig()
 	if err != nil {
