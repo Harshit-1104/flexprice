@@ -2,6 +2,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/flexprice/flexprice/internal/types"
 )
@@ -98,5 +99,24 @@ func TestAutoBindLeavesOptionalPointerNil(t *testing.T) {
 	}
 	if cfg.KafkaSecondary != nil {
 		t.Errorf("kafka_secondary = %#v, want nil (reflective bind must not allocate the optional pointer struct)", cfg.KafkaSecondary)
+	}
+}
+
+// TestUsageAlertsOverridesFromEnv confirms usage_alerts.overrides (a slice of structs) is
+// parsed from its JSON env var and that ForScope applies it.
+func TestUsageAlertsOverridesFromEnv(t *testing.T) {
+	t.Setenv("FLEXPRICE_USAGE_ALERTS_OVERRIDES_JSON", `[{"tenant_id":"t1","environment_id":"e1","schedule_delay":"30s","stale_after":"2m"}]`)
+
+	cfg, err := NewConfig()
+	if err != nil {
+		t.Fatalf("NewConfig() error: %v", err)
+	}
+	delay, stale := cfg.UsageAlerts.ForScope("t1", "e1")
+	if delay != 30*time.Second || stale != 2*time.Minute {
+		t.Errorf("ForScope(t1,e1) = (%v,%v), want (30s,2m)", delay, stale)
+	}
+	delay, stale = cfg.UsageAlerts.ForScope("t2", "e1")
+	if delay != cfg.UsageAlerts.ScheduleDelay || stale != cfg.UsageAlerts.StaleAfter {
+		t.Errorf("ForScope(t2,e1) = (%v,%v), want defaults", delay, stale)
 	}
 }

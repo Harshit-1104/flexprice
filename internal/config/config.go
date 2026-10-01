@@ -922,6 +922,36 @@ type UsageAlertsOverride struct {
 	StaleAfter    time.Duration `mapstructure:"stale_after"`
 }
 
+// parseUsageAlertsOverrides decodes a JSON array of overrides with Go duration strings.
+func parseUsageAlertsOverrides(raw string) ([]UsageAlertsOverride, error) {
+	var items []struct {
+		TenantID      string `json:"tenant_id"`
+		EnvironmentID string `json:"environment_id"`
+		ScheduleDelay string `json:"schedule_delay"`
+		StaleAfter    string `json:"stale_after"`
+	}
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, err
+	}
+	out := make([]UsageAlertsOverride, 0, len(items))
+	for _, it := range items {
+		o := UsageAlertsOverride{TenantID: it.TenantID, EnvironmentID: it.EnvironmentID}
+		var err error
+		if it.ScheduleDelay != "" {
+			if o.ScheduleDelay, err = time.ParseDuration(it.ScheduleDelay); err != nil {
+				return nil, fmt.Errorf("schedule_delay for %s/%s: %w", it.TenantID, it.EnvironmentID, err)
+			}
+		}
+		if it.StaleAfter != "" {
+			if o.StaleAfter, err = time.ParseDuration(it.StaleAfter); err != nil {
+				return nil, fmt.Errorf("stale_after for %s/%s: %w", it.TenantID, it.EnvironmentID, err)
+			}
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 func (c UsageAlertsConfig) ForScope(tenantID, environmentID string) (scheduleDelay, staleAfter time.Duration) {
 	scheduleDelay, staleAfter = c.ScheduleDelay, c.StaleAfter
 	for _, o := range c.Overrides {
@@ -1174,6 +1204,17 @@ func NewConfig() (*Configuration, error) {
 		cfg.Auth.APIKey.Keys = apiKeys
 	}
 
+	// Usage-alert per tenant×env overrides from env var (JSON array), e.g.
+	// [{"tenant_id":"t","environment_id":"e","schedule_delay":"30s","stale_after":"2m"}].
+	// Replaces any usage_alerts.overrides list from config.yaml.
+	if raw := os.Getenv("FLEXPRICE_USAGE_ALERTS_OVERRIDES_JSON"); raw != "" {
+		overrides, err := parseUsageAlertsOverrides(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse FLEXPRICE_USAGE_ALERTS_OVERRIDES_JSON: %v", err)
+		}
+		cfg.UsageAlerts.Overrides = overrides
+	}
+
 	// tenant webhook config
 	tenantWebhookConfig := make(map[string]TenantWebhookConfig)
 	if err := v.UnmarshalKey("webhook.tenants", &tenantWebhookConfig); err != nil {
@@ -1243,6 +1284,13 @@ func bindEnvs(v *viper.Viper, t reflect.Type, parts ...string) {
 			bindEnvs(v, ft, path...)
 		case reflect.Map:
 			// JSON-string env vars can't decode into a map; parsed by hand after Unmarshal.
+		case reflect.Slice:
+			// Slices of structs (e.g. usage_alerts.overrides) can't come from a comma-split
+			// env var; any env form is parsed as JSON by hand after Unmarshal.
+			if et := ft.Elem(); et.Kind() == reflect.Struct || (et.Kind() == reflect.Ptr && et.Elem().Kind() == reflect.Struct) {
+				continue
+			}
+			_ = v.BindEnv(strings.Join(path, "."))
 		default:
 			// scalars and slices (Viper splits comma-separated env into []string)
 			_ = v.BindEnv(strings.Join(path, "."))
