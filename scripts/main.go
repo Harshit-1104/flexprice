@@ -84,6 +84,11 @@ var commands = []Command{
 		Run:         internal.AddEnvironmentToTenant,
 	},
 	{
+		Name:        "set-usage-alert-config",
+		Description: "Upsert usage_alert_config for an environment (-tenant-id, -environment-id; SCHEDULE_DELAY_SECONDS, STALE_AFTER_SECONDS env vars)",
+		Run:         internal.SetUsageAlertConfig,
+	},
+	{
 		Name:        "migrate-invoice-sequences",
 		Description: "Migrate invoice sequences to include environment isolation",
 		Run:         internal.MigrateInvoiceSequences,
