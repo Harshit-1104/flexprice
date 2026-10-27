@@ -36,6 +36,15 @@ definitions:
       pagination:
         $ref: '#/definitions/types.PaginationResponse'
     type: object
+  ListContractsResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/ContractResponse'
+        type: array
+      pagination:
+        $ref: '#/definitions/types.PaginationResponse'
+    type: object
   ListCouponsResponse:
     properties:
       items:
@@ -390,6 +399,53 @@ definitions:
         items:
           $ref: '#/definitions/types.CommitmentStatus'
         type: array
+      subscription_ids:
+        items:
+          type: string
+        type: array
+    type: object
+  contract.Filter:
+    properties:
+      contract_ids:
+        items:
+          type: string
+        type: array
+      contract_statuses:
+        items:
+          $ref: '#/definitions/types.ContractStatus'
+        type: array
+      customer_ids:
+        items:
+          type: string
+        type: array
+      end_time:
+        type: string
+      expand:
+        type: string
+      filters:
+        items:
+          $ref: '#/definitions/types.FilterCondition'
+        type: array
+      limit:
+        maximum: 1000
+        minimum: 1
+        type: integer
+      offset:
+        minimum: 0
+        type: integer
+      order:
+        enum:
+        - asc
+        - desc
+        type: string
+      sort:
+        items:
+          $ref: '#/definitions/types.SortCondition'
+        type: array
+      start_time:
+        type: string
+      status:
+        $ref: '#/definitions/types.Status'
       subscription_ids:
         items:
           type: string
@@ -1835,6 +1891,44 @@ definitions:
     properties:
       plan_change:
         $ref: '#/definitions/PlanChangeScheduleDetails'
+    type: object
+  ContractAssociationResponse:
+    properties:
+      created_at:
+        type: string
+      entity_id:
+        type: string
+      entity_type:
+        $ref: '#/definitions/types.RevRecEntityType'
+      id:
+        type: string
+    type: object
+  ContractResponse:
+    properties:
+      associations:
+        items:
+          $ref: '#/definitions/ContractAssociationResponse'
+        type: array
+      contract_status:
+        $ref: '#/definitions/types.ContractStatus'
+      created_at:
+        type: string
+      currency:
+        type: string
+      customer_id:
+        type: string
+      ended_at:
+        type: string
+      id:
+        type: string
+      status:
+        $ref: '#/definitions/types.Status'
+      term_end:
+        type: string
+      term_start:
+        type: string
+      updated_at:
+        type: string
     type: object
   CostAnalyticItem:
     properties:
@@ -15086,6 +15180,18 @@ definitions:
     - CommitmentStatusActive
     - CommitmentStatusEnded
     - CommitmentStatusTerminated
+  types.ContractStatus:
+    enum:
+    - draft
+    - active
+    - ended
+    - cancelled
+    type: string
+    x-enum-varnames:
+    - ContractStatusDraft
+    - ContractStatusActive
+    - ContractStatusEnded
+    - ContractStatusCancelled
   types.ImprovementDirection:
     enum:
     - higher
@@ -15141,6 +15247,12 @@ definitions:
     - ReportValueTypeMoney
     - ReportValueTypeCount
     - ReportValueTypeDays
+  types.RevRecEntityType:
+    enum:
+    - subscription
+    type: string
+    x-enum-varnames:
+    - RevRecEntityTypeSubscription
   types.TenantInternalStatus:
     enum:
     - trialing
@@ -17400,6 +17512,78 @@ paths:
       summary: Query commitments
       tags:
       - Commitments
+      x-scope: read
+  /contracts/{id}:
+    get:
+      description: Use when you need to load a single revenue recognition contract
+        with the subscriptions it covers. Contracts are derived from subscriptions
+        and are read-only.
+      operationId: getContract
+      parameters:
+      - description: Contract ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/ContractResponse'
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/errors.ErrorResponse'
+        "404":
+          description: Resource not found
+          schema:
+            $ref: '#/definitions/errors.ErrorResponse'
+        "500":
+          description: Server error
+          schema:
+            $ref: '#/definitions/errors.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Get contract
+      tags:
+      - Contracts
+      x-scope: read
+  /contracts/search:
+    post:
+      consumes:
+      - application/json
+      description: Use when searching revenue recognition contracts by customer, subscription
+        or contract status. Returns a paginated list.
+      operationId: queryContract
+      parameters:
+      - description: Filter
+        in: body
+        name: filter
+        required: true
+        schema:
+          $ref: '#/definitions/contract.Filter'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/ListContractsResponse'
+        "400":
+          description: Invalid request
+          schema:
+            $ref: '#/definitions/errors.ErrorResponse'
+        "500":
+          description: Server error
+          schema:
+            $ref: '#/definitions/errors.ErrorResponse'
+      security:
+      - ApiKeyAuth: []
+      summary: Query contracts
+      tags:
+      - Contracts
       x-scope: read
   /costs:
     post:

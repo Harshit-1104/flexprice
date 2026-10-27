@@ -2015,6 +2015,113 @@ const docTemplate = `{
                 "x-scope": "delete"
             }
         },
+        "/contracts/search": {
+            "post": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Use when searching revenue recognition contracts by customer, subscription or contract status. Returns a paginated list.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Contracts"
+                ],
+                "summary": "Query contracts",
+                "operationId": "queryContract",
+                "parameters": [
+                    {
+                        "description": "Filter",
+                        "name": "filter",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/contract.Filter"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/ListContractsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request",
+                        "schema": {
+                            "$ref": "#/definitions/errors.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Server error",
+                        "schema": {
+                            "$ref": "#/definitions/errors.ErrorResponse"
+                        }
+                    }
+                },
+                "x-scope": "read"
+            }
+        },
+        "/contracts/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "description": "Use when you need to load a single revenue recognition contract with the subscriptions it covers. Contracts are derived from subscriptions and are read-only.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Contracts"
+                ],
+                "summary": "Get contract",
+                "operationId": "getContract",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Contract ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/ContractResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request",
+                        "schema": {
+                            "$ref": "#/definitions/errors.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Resource not found",
+                        "schema": {
+                            "$ref": "#/definitions/errors.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Server error",
+                        "schema": {
+                            "$ref": "#/definitions/errors.ErrorResponse"
+                        }
+                    }
+                },
+                "x-scope": "read"
+            }
+        },
         "/costs": {
             "post": {
                 "security": [
@@ -15876,6 +15983,20 @@ const docTemplate = `{
                 }
             }
         },
+        "ListContractsResponse": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ContractResponse"
+                    }
+                },
+                "pagination": {
+                    "$ref": "#/definitions/types.PaginationResponse"
+                }
+            }
+        },
         "ListCouponsResponse": {
             "type": "object",
             "properties": {
@@ -16415,6 +16536,75 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/types.CommitmentStatus"
                     }
+                },
+                "subscription_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "contract.Filter": {
+            "type": "object",
+            "properties": {
+                "contract_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "contract_statuses": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.ContractStatus"
+                    }
+                },
+                "customer_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "end_time": {
+                    "type": "string"
+                },
+                "expand": {
+                    "type": "string"
+                },
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.FilterCondition"
+                    }
+                },
+                "limit": {
+                    "type": "integer",
+                    "maximum": 1000,
+                    "minimum": 1
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0
+                },
+                "order": {
+                    "type": "string",
+                    "enum": [
+                        "asc",
+                        "desc"
+                    ]
+                },
+                "sort": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/types.SortCondition"
+                    }
+                },
+                "start_time": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/types.Status"
                 },
                 "subscription_ids": {
                     "type": "array",
@@ -18522,6 +18712,64 @@ const docTemplate = `{
             "properties": {
                 "plan_change": {
                     "$ref": "#/definitions/PlanChangeScheduleDetails"
+                }
+            }
+        },
+        "ContractAssociationResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "entity_id": {
+                    "type": "string"
+                },
+                "entity_type": {
+                    "$ref": "#/definitions/types.RevRecEntityType"
+                },
+                "id": {
+                    "type": "string"
+                }
+            }
+        },
+        "ContractResponse": {
+            "type": "object",
+            "properties": {
+                "associations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/ContractAssociationResponse"
+                    }
+                },
+                "contract_status": {
+                    "$ref": "#/definitions/types.ContractStatus"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "currency": {
+                    "type": "string"
+                },
+                "customer_id": {
+                    "type": "string"
+                },
+                "ended_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "status": {
+                    "$ref": "#/definitions/types.Status"
+                },
+                "term_end": {
+                    "type": "string"
+                },
+                "term_start": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
                 }
             }
         },
@@ -36525,6 +36773,21 @@ const docTemplate = `{
                 "CommitmentStatusTerminated"
             ]
         },
+        "types.ContractStatus": {
+            "type": "string",
+            "enum": [
+                "draft",
+                "active",
+                "ended",
+                "cancelled"
+            ],
+            "x-enum-varnames": [
+                "ContractStatusDraft",
+                "ContractStatusActive",
+                "ContractStatusEnded",
+                "ContractStatusCancelled"
+            ]
+        },
         "types.ImprovementDirection": {
             "type": "string",
             "enum": [
@@ -36597,6 +36860,15 @@ const docTemplate = `{
                 "ReportValueTypeMoney",
                 "ReportValueTypeCount",
                 "ReportValueTypeDays"
+            ]
+        },
+        "types.RevRecEntityType": {
+            "type": "string",
+            "enum": [
+                "subscription"
+            ],
+            "x-enum-varnames": [
+                "RevRecEntityTypeSubscription"
             ]
         },
         "types.TenantInternalStatus": {

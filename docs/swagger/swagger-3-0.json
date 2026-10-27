@@ -2419,6 +2419,135 @@
         "x-codegen-request-body-name": "request"
       }
     },
+    "/contracts/search": {
+      "post": {
+        "tags": [
+          "Contracts"
+        ],
+        "summary": "Query contracts",
+        "description": "Use when searching revenue recognition contracts by customer, subscription or contract status. Returns a paginated list.",
+        "operationId": "queryContract",
+        "requestBody": {
+          "description": "Filter",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/contract.Filter"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListContractsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/errors.ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/errors.ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "x-scope": "read",
+        "x-codegen-request-body-name": "filter"
+      }
+    },
+    "/contracts/{id}": {
+      "get": {
+        "tags": [
+          "Contracts"
+        ],
+        "summary": "Get contract",
+        "description": "Use when you need to load a single revenue recognition contract with the subscriptions it covers. Contracts are derived from subscriptions and are read-only.",
+        "operationId": "getContract",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Contract ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/errors.ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/errors.ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/errors.ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "x-scope": "read"
+      }
+    },
     "/costs": {
       "post": {
         "tags": [
@@ -18728,6 +18857,20 @@
           }
         }
       },
+      "ListContractsResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractResponse"
+            }
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/types.PaginationResponse"
+          }
+        }
+      },
       "ListCouponsResponse": {
         "type": "object",
         "properties": {
@@ -19221,6 +19364,77 @@
             "items": {
               "$ref": "#/components/schemas/types.CommitmentStatus"
             }
+          },
+          "subscription_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "contract.Filter": {
+        "type": "object",
+        "properties": {
+          "contract_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contract_statuses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/types.ContractStatus"
+            }
+          },
+          "customer_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "end_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expand": {
+            "type": "string"
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/types.FilterCondition"
+            }
+          },
+          "limit": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ]
+          },
+          "sort": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/types.SortCondition"
+            }
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "$ref": "#/components/schemas/types.Status"
           },
           "subscription_ids": {
             "type": "array",
@@ -21221,6 +21435,70 @@
         "properties": {
           "plan_change": {
             "$ref": "#/components/schemas/PlanChangeScheduleDetails"
+          }
+        }
+      },
+      "ContractAssociationResponse": {
+        "type": "object",
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entity_id": {
+            "type": "string"
+          },
+          "entity_type": {
+            "$ref": "#/components/schemas/types.RevRecEntityType"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "ContractResponse": {
+        "type": "object",
+        "properties": {
+          "associations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractAssociationResponse"
+            }
+          },
+          "contract_status": {
+            "$ref": "#/components/schemas/types.ContractStatus"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "customer_id": {
+            "type": "string"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/types.Status"
+          },
+          "term_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "term_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -38720,6 +38998,22 @@
         ],
         "x-speakeasy-name-override": "CommitmentStatus"
       },
+      "types.ContractStatus": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "active",
+          "ended",
+          "cancelled"
+        ],
+        "x-enum-varnames": [
+          "ContractStatusDraft",
+          "ContractStatusActive",
+          "ContractStatusEnded",
+          "ContractStatusCancelled"
+        ],
+        "x-speakeasy-name-override": "ContractStatus"
+      },
       "types.ImprovementDirection": {
         "type": "string",
         "enum": [
@@ -38799,6 +39093,16 @@
           "ReportValueTypeDays"
         ],
         "x-speakeasy-name-override": "ReportValueType"
+      },
+      "types.RevRecEntityType": {
+        "type": "string",
+        "enum": [
+          "subscription"
+        ],
+        "x-enum-varnames": [
+          "RevRecEntityTypeSubscription"
+        ],
+        "x-speakeasy-name-override": "RevRecEntityType"
       },
       "types.TenantInternalStatus": {
         "type": "string",
