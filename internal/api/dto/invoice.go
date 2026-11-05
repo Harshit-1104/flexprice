@@ -1014,6 +1014,25 @@ type InvoiceLineItemResponse struct {
 
 	// usage_breakdown contains flexible usage breakdown for this line item (supports any grouping)
 	UsageBreakdown []UsageBreakdownItem `json:"usage_breakdown,omitempty"`
+
+	// display_dates is this line item's service period as calendar days in the invoice's billing timezone
+	DisplayDates *InvoiceDisplayDates `json:"display_dates,omitempty"`
+}
+
+// InvoiceDisplayDates are an invoice's dates as calendar days (YYYY-MM-DD) in the timezone it was
+// billed in, with period_end being the last day the period covers. Use them to show dates; the
+// timestamps remain the source of truth.
+type InvoiceDisplayDates struct {
+	// timezone is the IANA timezone the days are expressed in
+	Timezone string `json:"timezone"`
+	// issue_date is the day the invoice was issued (finalized, when no issue date is set)
+	IssueDate string `json:"issue_date,omitempty"`
+	// due_date is the day payment is due
+	DueDate string `json:"due_date,omitempty"`
+	// period_start is the first day of the service period
+	PeriodStart string `json:"period_start,omitempty"`
+	// period_end is the last day of the service period (inclusive)
+	PeriodEnd string `json:"period_end,omitempty"`
 }
 
 func NewInvoiceLineItemResponse(item *invoice.InvoiceLineItem) *InvoiceLineItemResponse {
@@ -1278,6 +1297,9 @@ type InvoiceResponse struct {
 
 	// checkout_session is the payment session gating this invoice, when it was created with checkout
 	CheckoutSession *CheckoutSessionResponse `json:"checkout_session,omitempty"`
+
+	// display_dates are the invoice's dates as calendar days in the timezone it was billed in
+	DisplayDates *InvoiceDisplayDates `json:"display_dates,omitempty"`
 }
 
 // SourceUsageItem represents the usage breakdown for a specific source within a line item
@@ -1364,6 +1386,56 @@ func (r *InvoiceResponse) WithOverpaidAmount(amount *decimal.Decimal) *InvoiceRe
 // WithLineItems sets the line items for the invoice response
 func (r *InvoiceResponse) WithLineItems(lineItems []*InvoiceLineItemResponse) *InvoiceResponse {
 	r.LineItems = lineItems
+	return r
+}
+
+// BillingTimezone is the timezone the invoice was billed in: the subscription's (its periods are
+// computed there), else the customer's, else UTC.
+func (r *InvoiceResponse) BillingTimezone() string {
+	if r.Subscription != nil && r.Subscription.Subscription != nil && r.Subscription.Timezone != "" {
+		return r.Subscription.Timezone
+	}
+	if r.Customer != nil && r.Customer.Customer != nil && r.Customer.Timezone != "" {
+		return r.Customer.Timezone
+	}
+	return types.DefaultTimezone
+}
+
+// WithDisplayDates fills display_dates on the invoice and its line items. Call it once the
+// subscription and customer are set, since they decide the timezone.
+func (r *InvoiceResponse) WithDisplayDates() *InvoiceResponse {
+	tz := r.BillingTimezone()
+	loc := types.LoadTimezone(tz)
+	day := func(t *time.Time) string {
+		if t == nil || t.IsZero() {
+			return ""
+		}
+		return types.InvoiceDay(*t, loc).Format(time.DateOnly)
+	}
+	endDay := func(t *time.Time) string {
+		if t == nil || t.IsZero() {
+			return ""
+		}
+		return types.InvoicePeriodEndDay(*t, loc).Format(time.DateOnly)
+	}
+
+	r.DisplayDates = &InvoiceDisplayDates{
+		Timezone:    tz,
+		IssueDate:   day(lo.CoalesceOrEmpty(r.IssueDate, r.FinalizedAt)),
+		DueDate:     day(r.DueDate),
+		PeriodStart: day(r.PeriodStart),
+		PeriodEnd:   endDay(r.PeriodEnd),
+	}
+	for _, item := range r.LineItems {
+		if item == nil {
+			continue
+		}
+		item.DisplayDates = &InvoiceDisplayDates{
+			Timezone:    tz,
+			PeriodStart: day(item.PeriodStart),
+			PeriodEnd:   endDay(item.PeriodEnd),
+		}
+	}
 	return r
 }
 

@@ -26,6 +26,26 @@ func LoadTimezone(tz string) *time.Location {
 	return time.UTC
 }
 
+// InvoiceDay returns t in loc, the timezone an invoice was billed in, so that its calendar day is
+// the day the invoice shows. A zero time stays zero.
+func InvoiceDay(t time.Time, loc *time.Location) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.In(loc)
+}
+
+// InvoicePeriodEndDay returns the last instant an exclusive period end covers, in loc. Periods are
+// half-open: period_end is the first instant of the next period, so a September period billed in
+// Asia/Kolkata ends at 1 Oct 00:00 IST, and one second earlier (30 Sep) is the day shown.
+// A zero time stays zero.
+func InvoicePeriodEndDay(end time.Time, loc *time.Location) time.Time {
+	if end.IsZero() {
+		return end
+	}
+	return end.Add(-time.Second).In(loc)
+}
+
 // FloorToStartOfDay returns the start of the calendar day (00:00:00.000)
 // containing t, evaluated in the given IANA timezone. Empty or unknown tz
 // falls back to UTC (matching LoadTimezone). The returned instant is UTC.

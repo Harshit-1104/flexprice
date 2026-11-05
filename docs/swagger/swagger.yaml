@@ -5806,6 +5806,25 @@ definitions:
     required:
     - coupon_id
     type: object
+  InvoiceDisplayDates:
+    properties:
+      due_date:
+        description: due_date is the day payment is due
+        type: string
+      issue_date:
+        description: issue_date is the day the invoice was issued (finalized, when
+          no issue date is set)
+        type: string
+      period_end:
+        description: period_end is the last day of the service period (inclusive)
+        type: string
+      period_start:
+        description: period_start is the first day of the service period
+        type: string
+      timezone:
+        description: timezone is the IANA timezone the days are expressed in
+        type: string
+    type: object
   InvoiceLineItemCoupon:
     properties:
       coupon_association_id:
@@ -5877,6 +5896,11 @@ definitions:
           The fields above are fiat projections of it; nil for fiat invoices.
       customer_id:
         type: string
+      display_dates:
+        allOf:
+        - $ref: '#/definitions/InvoiceDisplayDates'
+        description: display_dates is this line item's service period as calendar
+          days in the invoice's billing timezone
       display_name:
         type: string
       entity_id:
@@ -6099,6 +6123,11 @@ definitions:
       description:
         description: description is an optional description or notes about this invoice
         type: string
+      display_dates:
+        allOf:
+        - $ref: '#/definitions/InvoiceDisplayDates'
+        description: display_dates are the invoice's dates as calendar days in the
+          timezone it was billed in
       due_date:
         description: due_date is the date when payment for this invoice is due
         type: string

@@ -1002,6 +1002,7 @@ func (s *invoiceService) GetInvoice(ctx context.Context, id string) (*dto.Invoic
 	}
 
 	response.WithTaxes(appliedTaxes.Items)
+	response.WithDisplayDates()
 
 	return response, nil
 }
@@ -3729,13 +3730,9 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		invoiceNum = *inv.InvoiceNumber
 	}
 
-	// Every date on the PDF is shown as the day it falls on in the timezone the invoice was billed in:
-	// the subscription's (its periods are computed there), else the customer's, else UTC.
-	timezone := customer.Timezone
-	if inv.Subscription != nil && inv.Subscription.Subscription != nil && inv.Subscription.Timezone != "" {
-		timezone = inv.Subscription.Timezone
-	}
-	loc := types.LoadTimezone(timezone)
+	// Every date on the PDF is the day it falls on in the timezone the invoice was billed in,
+	// the same days the API returns in display_dates.
+	loc := types.LoadTimezone(inv.BillingTimezone())
 
 	// Round to currency precision before converting to float64
 	precision := types.GetCurrencyPrecision(inv.Currency)
@@ -3774,8 +3771,8 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		Notes:                      "",  // resolved from invoice metadata
 		VAT:                        0.0, // resolved from invoice metadata
 		Biller:                     s.getBillerInfo(tenant, billerTaxIDs),
-		PeriodStart:                pdf.NewDate(lo.FromPtr(inv.PeriodStart), loc),
-		PeriodEnd:                  pdf.NewPeriodEnd(lo.FromPtr(inv.PeriodEnd), loc),
+		PeriodStart:                pdf.CustomTime{Time: types.InvoiceDay(lo.FromPtr(inv.PeriodStart), loc)},
+		PeriodEnd:                  pdf.CustomTime{Time: types.InvoicePeriodEndDay(lo.FromPtr(inv.PeriodEnd), loc)},
 		Recipient:                  s.getRecipientInfo(customer, customerTaxIDs),
 		BillingPeriod:              lo.FromPtrOr(inv.BillingPeriod, ""),
 		Description:                inv.Description,
@@ -3787,13 +3784,13 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 
 	// Convert dates
 	if inv.DueDate != nil {
-		data.DueDate = pdf.NewDate(*inv.DueDate, loc)
+		data.DueDate = pdf.CustomTime{Time: types.InvoiceDay(*inv.DueDate, loc)}
 	}
 
 	if inv.IssueDate != nil {
-		data.IssuingDate = pdf.NewDate(*inv.IssueDate, loc)
+		data.IssuingDate = pdf.CustomTime{Time: types.InvoiceDay(*inv.IssueDate, loc)}
 	} else if inv.FinalizedAt != nil {
-		data.IssuingDate = pdf.NewDate(*inv.FinalizedAt, loc)
+		data.IssuingDate = pdf.CustomTime{Time: types.InvoiceDay(*inv.FinalizedAt, loc)}
 	}
 
 	// Parse metadata if available
@@ -3950,10 +3947,10 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		}
 
 		if item.PeriodStart != nil {
-			lineItem.PeriodStart = pdf.NewDate(*item.PeriodStart, loc)
+			lineItem.PeriodStart = pdf.CustomTime{Time: types.InvoiceDay(*item.PeriodStart, loc)}
 		}
 		if item.PeriodEnd != nil {
-			lineItem.PeriodEnd = pdf.NewPeriodEnd(*item.PeriodEnd, loc)
+			lineItem.PeriodEnd = pdf.CustomTime{Time: types.InvoicePeriodEndDay(*item.PeriodEnd, loc)}
 		}
 
 		if item.UsageBreakdown != nil {

@@ -1,7 +1,6 @@
-package pdf
+package types
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -9,23 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func mustLoad(t *testing.T, name string) *time.Location {
-	t.Helper()
-	loc, err := time.LoadLocation(name)
-	require.NoError(t, err)
-	return loc
-}
-
-func marshalDate(t *testing.T, ct CustomTime) string {
-	t.Helper()
-	b, err := json.Marshal(ct)
-	require.NoError(t, err)
-	var s string
-	require.NoError(t, json.Unmarshal(b, &s))
-	return s
-}
-
-func TestPeriodDatesFollowBillingTimezone(t *testing.T) {
+func TestInvoicePeriodDaysFollowBillingTimezone(t *testing.T) {
 	tests := []struct {
 		name      string
 		tz        string
@@ -62,26 +45,26 @@ func TestPeriodDatesFollowBillingTimezone(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			loc := mustLoad(t, tc.tz)
+			loc := LoadTimezone(tc.tz)
 			start, err := time.Parse(time.RFC3339, tc.start)
 			require.NoError(t, err)
 			end, err := time.Parse(time.RFC3339, tc.end)
 			require.NoError(t, err)
 
-			assert.Equal(t, tc.wantStart, marshalDate(t, NewDate(start, loc)))
-			assert.Equal(t, tc.wantEnd, marshalDate(t, NewPeriodEnd(end, loc)))
+			assert.Equal(t, tc.wantStart, InvoiceDay(start, loc).Format(time.DateOnly))
+			assert.Equal(t, tc.wantEnd, InvoicePeriodEndDay(end, loc).Format(time.DateOnly))
 		})
 	}
 }
 
-func TestNewDateUsesBillingTimezoneDay(t *testing.T) {
+func TestInvoiceDayUsesBillingTimezone(t *testing.T) {
 	// 31 Oct 20:00 UTC is already 1 Nov in India.
 	issued := time.Date(2026, 10, 31, 20, 0, 0, 0, time.UTC)
-	assert.Equal(t, "2026-11-01", marshalDate(t, NewDate(issued, mustLoad(t, "Asia/Kolkata"))))
-	assert.Equal(t, "2026-10-31", marshalDate(t, NewDate(issued, time.UTC)))
+	assert.Equal(t, "2026-11-01", InvoiceDay(issued, LoadTimezone("Asia/Kolkata")).Format(time.DateOnly))
+	assert.Equal(t, "2026-10-31", InvoiceDay(issued, time.UTC).Format(time.DateOnly))
 }
 
-func TestZeroDatesStayEmpty(t *testing.T) {
-	assert.Equal(t, "", marshalDate(t, NewDate(time.Time{}, time.UTC)))
-	assert.Equal(t, "", marshalDate(t, NewPeriodEnd(time.Time{}, time.UTC)))
+func TestInvoiceDaysKeepZeroTimes(t *testing.T) {
+	assert.True(t, InvoiceDay(time.Time{}, time.UTC).IsZero())
+	assert.True(t, InvoicePeriodEndDay(time.Time{}, time.UTC).IsZero())
 }

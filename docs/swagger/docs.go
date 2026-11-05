@@ -25011,6 +25011,31 @@ const docTemplate = `{
                 }
             }
         },
+        "InvoiceDisplayDates": {
+            "type": "object",
+            "properties": {
+                "due_date": {
+                    "description": "due_date is the day payment is due",
+                    "type": "string"
+                },
+                "issue_date": {
+                    "description": "issue_date is the day the invoice was issued (finalized, when no issue date is set)",
+                    "type": "string"
+                },
+                "period_end": {
+                    "description": "period_end is the last day of the service period (inclusive)",
+                    "type": "string"
+                },
+                "period_start": {
+                    "description": "period_start is the first day of the service period",
+                    "type": "string"
+                },
+                "timezone": {
+                    "description": "timezone is the IANA timezone the days are expressed in",
+                    "type": "string"
+                }
+            }
+        },
         "InvoiceLineItemCoupon": {
             "type": "object",
             "required": [
@@ -25106,6 +25131,14 @@ const docTemplate = `{
                 },
                 "customer_id": {
                     "type": "string"
+                },
+                "display_dates": {
+                    "description": "display_dates is this line item's service period as calendar days in the invoice's billing timezone",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/InvoiceDisplayDates"
+                        }
+                    ]
                 },
                 "display_name": {
                     "type": "string"
@@ -25395,6 +25428,14 @@ const docTemplate = `{
                 "description": {
                     "description": "description is an optional description or notes about this invoice",
                     "type": "string"
+                },
+                "display_dates": {
+                    "description": "display_dates are the invoice's dates as calendar days in the timezone it was billed in",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/InvoiceDisplayDates"
+                        }
+                    ]
                 },
                 "due_date": {
                     "description": "due_date is the date when payment for this invoice is due",

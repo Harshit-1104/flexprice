@@ -27696,6 +27696,35 @@
           }
         }
       },
+      "InvoiceDisplayDates": {
+        "type": "object",
+        "properties": {
+          "due_date": {
+            "type": "string",
+            "description": "due_date is the day payment is due",
+            "format": "date-time"
+          },
+          "issue_date": {
+            "type": "string",
+            "description": "issue_date is the day the invoice was issued (finalized, when no issue date is set)",
+            "format": "date-time"
+          },
+          "period_end": {
+            "type": "string",
+            "description": "period_end is the last day of the service period (inclusive)",
+            "format": "date-time"
+          },
+          "period_start": {
+            "type": "string",
+            "description": "period_start is the first day of the service period",
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "timezone is the IANA timezone the days are expressed in"
+          }
+        }
+      },
       "InvoiceLineItemCoupon": {
         "required": [
           "coupon_id",
@@ -27789,6 +27818,9 @@
           },
           "customer_id": {
             "type": "string"
+          },
+          "display_dates": {
+            "$ref": "#/components/schemas/InvoiceDisplayDates"
           },
           "display_name": {
             "type": "string"
@@ -28063,6 +28095,9 @@
           "description": {
             "type": "string",
             "description": "description is an optional description or notes about this invoice"
+          },
+          "display_dates": {
+            "$ref": "#/components/schemas/InvoiceDisplayDates"
           },
           "due_date": {
             "type": "string",
