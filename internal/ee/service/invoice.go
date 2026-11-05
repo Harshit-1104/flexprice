@@ -3729,6 +3729,14 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		invoiceNum = *inv.InvoiceNumber
 	}
 
+	// Every date on the PDF is shown as the day it falls on in the timezone the invoice was billed in:
+	// the subscription's (its periods are computed there), else the customer's, else UTC.
+	timezone := customer.Timezone
+	if inv.Subscription != nil && inv.Subscription.Subscription != nil && inv.Subscription.Timezone != "" {
+		timezone = inv.Subscription.Timezone
+	}
+	loc := types.LoadTimezone(timezone)
+
 	// Round to currency precision before converting to float64
 	precision := types.GetCurrencyPrecision(inv.Currency)
 	subtotal, _ := inv.Subtotal.Round(precision).Float64()
@@ -3766,8 +3774,8 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		Notes:                      "",  // resolved from invoice metadata
 		VAT:                        0.0, // resolved from invoice metadata
 		Biller:                     s.getBillerInfo(tenant, billerTaxIDs),
-		PeriodStart:                pdf.CustomTime{Time: lo.FromPtr(inv.PeriodStart)},
-		PeriodEnd:                  pdf.CustomTime{Time: lo.FromPtr(inv.PeriodEnd)},
+		PeriodStart:                pdf.NewDate(lo.FromPtr(inv.PeriodStart), loc),
+		PeriodEnd:                  pdf.NewPeriodEnd(lo.FromPtr(inv.PeriodEnd), loc),
 		Recipient:                  s.getRecipientInfo(customer, customerTaxIDs),
 		BillingPeriod:              lo.FromPtrOr(inv.BillingPeriod, ""),
 		Description:                inv.Description,
@@ -3779,13 +3787,13 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 
 	// Convert dates
 	if inv.DueDate != nil {
-		data.DueDate = pdf.CustomTime{Time: *inv.DueDate}
+		data.DueDate = pdf.NewDate(*inv.DueDate, loc)
 	}
 
 	if inv.IssueDate != nil {
-		data.IssuingDate = pdf.CustomTime{Time: *inv.IssueDate}
+		data.IssuingDate = pdf.NewDate(*inv.IssueDate, loc)
 	} else if inv.FinalizedAt != nil {
-		data.IssuingDate = pdf.CustomTime{Time: *inv.FinalizedAt}
+		data.IssuingDate = pdf.NewDate(*inv.FinalizedAt, loc)
 	}
 
 	// Parse metadata if available
@@ -3942,10 +3950,10 @@ func (s *invoiceService) getInvoiceDataForPDFGen(
 		}
 
 		if item.PeriodStart != nil {
-			lineItem.PeriodStart = pdf.CustomTime{Time: *item.PeriodStart}
+			lineItem.PeriodStart = pdf.NewDate(*item.PeriodStart, loc)
 		}
 		if item.PeriodEnd != nil {
-			lineItem.PeriodEnd = pdf.CustomTime{Time: *item.PeriodEnd}
+			lineItem.PeriodEnd = pdf.NewPeriodEnd(*item.PeriodEnd, loc)
 		}
 
 		if item.UsageBreakdown != nil {

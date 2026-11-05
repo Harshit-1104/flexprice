@@ -135,6 +135,24 @@ type CustomTime struct {
 	time.Time
 }
 
+// NewDate renders t as the calendar day it falls on in loc, the timezone the invoice was billed in.
+func NewDate(t time.Time, loc *time.Location) CustomTime {
+	if t.IsZero() {
+		return CustomTime{}
+	}
+	return CustomTime{Time: t.In(loc)}
+}
+
+// NewPeriodEnd renders an exclusive period end as the last day the period covers in loc.
+// Periods are half-open: period_end is the first instant of the next period, so a September
+// period in Asia/Kolkata ends at 1 Oct 00:00 IST. One second earlier is 30 Sep, the day shown.
+func NewPeriodEnd(t time.Time, loc *time.Location) CustomTime {
+	if t.IsZero() {
+		return CustomTime{}
+	}
+	return NewDate(t.Add(-time.Second), loc)
+}
+
 func (ct CustomTime) MarshalJSON() ([]byte, error) {
 	if ct.IsZero() {
 		return json.Marshal("")
